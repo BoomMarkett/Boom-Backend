@@ -2,7 +2,17 @@ const express = require('express');
 const crypto = require('crypto');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
-const { findOrCreateUser, getUserByTgId, adjustBalance } = require('./database');
+const {
+    findOrCreateUser,
+    getUserByTgId,
+    adjustBalance,
+    listCollections,
+    getFiltersForCollection,
+    findListings,
+    getListingById,
+    createListing,
+    setListingStatus,
+} = require('./database');
 
 const app = express();
 app.use(cors());
@@ -147,6 +157,78 @@ app.post('/api/withdraw', requireAuth, (req, res) => {
     } catch (e) {
         res.status(400).json({ ok: false, error: e.message });
     }
+});
+
+// === Коллекции (для дропдауна "NFT" в фильтрах) ===
+app.get('/api/collections', (req, res) => {
+    res.json({ ok: true, collections: listCollections() });
+});
+
+// === Доступные модели/фоны/символы для конкретной коллекции ===
+app.get('/api/collections/:id/filters', (req, res) => {
+    const collectionId = parseInt(req.params.id, 10);
+    if (!collectionId) {
+        return res.status(400).json({ ok: false, error: 'Некорректный id коллекции' });
+    }
+    res.json({ ok: true, filters: getFiltersForCollection(collectionId) });
+});
+
+// === Список активных листингов с фильтрами/сортировкой ===
+// GET /api/listings?collectionId=1&model=Apex%20Predator&backdrop=Satin%20Gold&symbol=Coin&search=Evil&sort=price_asc
+app.get('/api/listings', (req, res) => {
+    const { collectionId, model, backdrop, symbol, search, sort } = req.query;
+
+    const listings = findListings({
+        collectionId: collectionId ? parseInt(collectionId, 10) : undefined,
+        modelName: model || undefined,
+        backdropName: backdrop || undefined,
+        symbolName: symbol || undefined,
+        search: search || undefined,
+        sort: sort || undefined,
+    });
+
+    res.json({ ok: true, listings });
+});
+
+// === Выставить лот на продажу ===
+app.post('/api/listings', requireAuth, (req, res) => {
+    const { collectionId, modelId, backdropId, symbolId, giftNumber, nftAddress, price } = req.body;
+
+    const parsedPrice = parseFloat(price);
+    if (!collectionId || !giftNumber || !parsedPrice || parsedPrice <= 0) {
+        return res.status(400).json({ ok: false, error: 'Заполнены не все обязательные поля' });
+    }
+
+    const listing = createListing({
+        owner_tg_id: req.tgId,
+        collection_id: collectionId,
+        model_id: modelId || null,
+        backdrop_id: backdropId || null,
+        symbol_id: symbolId || null,
+        gift_number: giftNumber,
+        nft_address: nftAddress || null,
+        price: parsedPrice,
+    });
+
+    res.json({ ok: true, listing });
+});
+
+// === Снять лот с продажи (только владелец) ===
+app.delete('/api/listings/:id', requireAuth, (req, res) => {
+    const listing = getListingById(parseInt(req.params.id, 10));
+
+    if (!listing) {
+        return res.status(404).json({ ok: false, error: 'Листинг не найден' });
+    }
+    if (listing.owner_tg_id !== req.tgId) {
+        return res.status(403).json({ ok: false, error: 'Это не ваш листинг' });
+    }
+    if (listing.status !== 'active') {
+        return res.status(400).json({ ok: false, error: 'Листинг уже неактивен' });
+    }
+
+    const updated = setListingStatus(listing.id, 'cancelled');
+    res.json({ ok: true, listing: updated });
 });
 
 app.get('/', (req, res) => {
