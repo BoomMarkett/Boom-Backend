@@ -232,7 +232,7 @@ app.delete('/api/listings/:id', requireAuth, (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.send('BoomMarket Backend работает');
+    res.send('BoomMarket Backend работает v2');
 });
 
 const PORT = process.env.PORT || 3000;
