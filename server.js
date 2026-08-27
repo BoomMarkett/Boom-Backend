@@ -8,6 +8,7 @@ const {
     adjustBalance,
     listCollections,
     getFiltersForCollection,
+    getAllFilters,
     findListings,
     getListingById,
     createListing,
@@ -162,6 +163,12 @@ app.post('/api/withdraw', requireAuth, (req, res) => {
 // === Коллекции (для дропдауна "NFT" в фильтрах) ===
 app.get('/api/collections', (req, res) => {
     res.json({ ok: true, collections: listCollections() });
+});
+
+// === Доступные модели/фоны/символы по ВСЕМ коллекциям — для фильтров по умолчанию,
+// пока в дропдауне "NFT" ничего не выбрано ===
+app.get('/api/filters', (req, res) => {
+    res.json({ ok: true, filters: getAllFilters() });
 });
 
 // === Доступные модели/фоны/символы для конкретной коллекции ===

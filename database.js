@@ -164,6 +164,12 @@ const catalogStatements = {
     modelsByCollection: db.prepare('SELECT * FROM gift_models WHERE collection_id = ? ORDER BY name'),
     backdropsByCollection: db.prepare('SELECT * FROM gift_backdrops WHERE collection_id = ? ORDER BY name'),
     symbolsByCollection: db.prepare('SELECT * FROM gift_symbols WHERE collection_id = ? ORDER BY name'),
+
+    // Уникальные названия по ВСЕМ коллекциям сразу — для фильтров, когда
+    // конкретная коллекция ещё не выбрана (сужаем список, только если выбрали "NFT").
+    allModelNames: db.prepare('SELECT DISTINCT name FROM gift_models ORDER BY name'),
+    allBackdropNames: db.prepare('SELECT DISTINCT name FROM gift_backdrops ORDER BY name'),
+    allSymbolNames: db.prepare('SELECT DISTINCT name FROM gift_symbols ORDER BY name'),
 };
 
 function upsertCollection({ ton_address, name, image_url }) {
@@ -192,6 +198,15 @@ function getFiltersForCollection(collection_id) {
         models: catalogStatements.modelsByCollection.all(collection_id),
         backdrops: catalogStatements.backdropsByCollection.all(collection_id),
         symbols: catalogStatements.symbolsByCollection.all(collection_id),
+    };
+}
+
+/** Уникальные модели/фоны/символы по всем коллекциям — для фильтров по умолчанию. */
+function getAllFilters() {
+    return {
+        models: catalogStatements.allModelNames.all(),
+        backdrops: catalogStatements.allBackdropNames.all(),
+        symbols: catalogStatements.allSymbolNames.all(),
     };
 }
 
@@ -290,6 +305,7 @@ module.exports = {
     upsertBackdrop,
     upsertSymbol,
     getFiltersForCollection,
+    getAllFilters,
     createListing,
     getListingById,
     setListingStatus,
