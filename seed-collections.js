@@ -31,7 +31,7 @@ const {
     upsertModel,
     upsertBackdrop,
     upsertSymbol,
-} = require('../database');
+} = require('./database');
 
 // === ЗАПОЛНИ ЭТИМ СПИСКОМ реальные адреса нужных тебе коллекций ===
 const COLLECTION_ADDRESSES = [
