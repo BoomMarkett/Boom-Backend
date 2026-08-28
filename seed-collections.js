@@ -247,12 +247,29 @@ async function seedCollection(address) {
     const modelCounts = {};
     const backdropCounts = {};
     const symbolCounts = {};
+    // Картинка примера айтема с этим трейтом — берём саму картинку NFT
+    // (у Telegram-подарков нет отдельных иконок для модели/фона отдельно
+    // от полной картинки самого подарка), сохраняем первую попавшуюся.
+    const modelImage = {};
+    const backdropImage = {};
+    const symbolImage = {};
 
     for (const item of items) {
         const { model, backdrop, symbol } = extractTraits(item);
-        if (model) modelCounts[model] = (modelCounts[model] || 0) + 1;
-        if (backdrop) backdropCounts[backdrop] = (backdropCounts[backdrop] || 0) + 1;
-        if (symbol) symbolCounts[symbol] = (symbolCounts[symbol] || 0) + 1;
+        const itemImage = item.metadata?.image || item.previews?.[0]?.url || null;
+
+        if (model) {
+            modelCounts[model] = (modelCounts[model] || 0) + 1;
+            if (!modelImage[model] && itemImage) modelImage[model] = itemImage;
+        }
+        if (backdrop) {
+            backdropCounts[backdrop] = (backdropCounts[backdrop] || 0) + 1;
+            if (!backdropImage[backdrop] && itemImage) backdropImage[backdrop] = itemImage;
+        }
+        if (symbol) {
+            symbolCounts[symbol] = (symbolCounts[symbol] || 0) + 1;
+            if (!symbolImage[symbol] && itemImage) symbolImage[symbol] = itemImage;
+        }
     }
 
     const total = items.length;
@@ -261,13 +278,13 @@ async function seedCollection(address) {
     const symbolRarity = computeRarity(symbolCounts, total);
 
     for (const modelName of Object.keys(modelCounts)) {
-        upsertModel(collection.id, modelName, modelRarity[modelName]);
+        upsertModel(collection.id, modelName, modelRarity[modelName], modelImage[modelName]);
     }
     for (const backdropName of Object.keys(backdropCounts)) {
-        upsertBackdrop(collection.id, backdropName, null, backdropRarity[backdropName]);
+        upsertBackdrop(collection.id, backdropName, null, backdropRarity[backdropName], backdropImage[backdropName]);
     }
     for (const symbolName of Object.keys(symbolCounts)) {
-        upsertSymbol(collection.id, symbolName, null, symbolRarity[symbolName]);
+        upsertSymbol(collection.id, symbolName, symbolImage[symbolName], symbolRarity[symbolName]);
     }
 
     console.log(
