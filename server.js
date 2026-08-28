@@ -7,8 +7,7 @@ const {
     getUserByTgId,
     adjustBalance,
     listCollections,
-    getFiltersForCollection,
-    getAllFilters,
+    getFiltersForCollections,
     findListings,
     getListingById,
     createListing,
@@ -62,11 +61,6 @@ function checkTelegramAuth(initData) {
     }
 }
 
-/**
- * Проверяет JWT-токен, присланный клиентом в заголовке Authorization: Bearer <token>.
- * Токен выдаётся один раз при /api/auth и живёт TOKEN_LIFETIME — дальше фронтенд
- * предъявляет его на каждый защищённый запрос вместо пересылки initData целиком.
- */
 function requireAuth(req, res, next) {
     const authHeader = req.headers['authorization'] || '';
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
@@ -84,7 +78,19 @@ function requireAuth(req, res, next) {
     }
 }
 
-// === Авторизация: проверяем подпись Telegram, сохраняем пользователя, выдаём JWT ===
+// Парсит "1,2,3" -> [1,2,3] (числа), пропускает пустые/некорректные значения.
+function parseIntList(raw) {
+    if (!raw) return [];
+    return raw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !Number.isNaN(n));
+}
+
+// Парсит "A,B,C" -> ['A','B','C'] (строки), обрезает пробелы, убирает пустые.
+function parseStringList(raw) {
+    if (!raw) return [];
+    return raw.split(',').map(s => s.trim()).filter(Boolean);
+}
+
+// === Авторизация ===
 app.post('/api/auth', (req, res) => {
     const { initData } = req.body;
 
@@ -119,7 +125,6 @@ app.post('/api/auth', (req, res) => {
     });
 });
 
-// === Получить актуальный баланс ===
 app.get('/api/balance', requireAuth, (req, res) => {
     const user = getUserByTgId(req.tgId);
 
@@ -130,9 +135,6 @@ app.get('/api/balance', requireAuth, (req, res) => {
     res.json({ ok: true, balance: user.balance });
 });
 
-// === Пополнение баланса ===
-// ВАЖНО: сейчас это просто прибавляет сумму без проверки реального платежа.
-// Заглушка на время, пока не подключён приём настоящих TON-транзакций.
 app.post('/api/deposit', requireAuth, (req, res) => {
     const amount = parseFloat(req.body.amount);
 
@@ -144,7 +146,6 @@ app.post('/api/deposit', requireAuth, (req, res) => {
     res.json({ ok: true, balance: user.balance });
 });
 
-// === Вывод средств ===
 app.post('/api/withdraw', requireAuth, (req, res) => {
     const amount = parseFloat(req.body.amount);
 
@@ -160,36 +161,28 @@ app.post('/api/withdraw', requireAuth, (req, res) => {
     }
 });
 
-// === Коллекции (для дропдауна "NFT" в фильтрах) ===
+// === Коллекции (для пикера "NFT") ===
 app.get('/api/collections', (req, res) => {
     res.json({ ok: true, collections: listCollections() });
 });
 
-// === Доступные модели/фоны/символы по ВСЕМ коллекциям — для фильтров по умолчанию,
-// пока в дропдауне "NFT" ничего не выбрано ===
+// === Модели/фоны/символы, сузенные до выбранных коллекций ===
+// GET /api/filters?collectionIds=1,3,7  (без параметра — по всем коллекциям)
 app.get('/api/filters', (req, res) => {
-    res.json({ ok: true, filters: getAllFilters() });
+    const collectionIds = parseIntList(req.query.collectionIds);
+    res.json({ ok: true, filters: getFiltersForCollections(collectionIds) });
 });
 
-// === Доступные модели/фоны/символы для конкретной коллекции ===
-app.get('/api/collections/:id/filters', (req, res) => {
-    const collectionId = parseInt(req.params.id, 10);
-    if (!collectionId) {
-        return res.status(400).json({ ok: false, error: 'Некорректный id коллекции' });
-    }
-    res.json({ ok: true, filters: getFiltersForCollection(collectionId) });
-});
-
-// === Список активных листингов с фильтрами/сортировкой ===
-// GET /api/listings?collectionId=1&model=Apex%20Predator&backdrop=Satin%20Gold&symbol=Coin&search=Evil&sort=price_asc
+// === Список активных листингов — каждый из фильтров теперь может быть списком через запятую ===
+// GET /api/listings?collectionId=1,2&model=Anniversary,Backyard&backdrop=Black&symbol=Coin&search=Evil&sort=price_asc
 app.get('/api/listings', (req, res) => {
     const { collectionId, model, backdrop, symbol, search, sort } = req.query;
 
     const listings = findListings({
-        collectionId: collectionId ? parseInt(collectionId, 10) : undefined,
-        modelName: model || undefined,
-        backdropName: backdrop || undefined,
-        symbolName: symbol || undefined,
+        collectionIds: parseIntList(collectionId),
+        modelNames: parseStringList(model),
+        backdropNames: parseStringList(backdrop),
+        symbolNames: parseStringList(symbol),
         search: search || undefined,
         sort: sort || undefined,
     });
@@ -239,7 +232,7 @@ app.delete('/api/listings/:id', requireAuth, (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.send('BoomMarket Backend работает v2');
+    res.send('BoomMarket Backend работает v3');
 });
 
 const PORT = process.env.PORT || 3000;

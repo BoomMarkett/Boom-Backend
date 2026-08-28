@@ -4,7 +4,6 @@ const path = require('path');
 // Файл базы данных лежит рядом с server.js — при первом запуске создастся сам
 const db = new Database(path.join(__dirname, 'boommarket.db'));
 
-// Небольшой прирост производительности и надёжности для SQLite
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
@@ -21,24 +20,19 @@ db.exec(`
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
-    -- Коллекция подарков Telegram (например "Ice Cream", "Jingle Bells").
-    -- Заполняется сид-скриптом (scripts/seed-collections.js) реальными данными из TonAPI,
-    -- а не руками — см. комментарии в этом скрипте.
     CREATE TABLE IF NOT EXISTS collections (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ton_address TEXT UNIQUE,       -- адрес коллекции в TON, NULL для ручных/тестовых
+        ton_address TEXT UNIQUE,
         name TEXT NOT NULL,
         image_url TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
-    -- Каталог возможных моделей/фонов/символов по каждой коллекции — используется
-    -- и для фильтров на фронте, и для проверки, что листинг ссылается на существующий трейт.
     CREATE TABLE IF NOT EXISTS gift_models (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
         name TEXT NOT NULL,
-        rarity_permille REAL,          -- доля от общего числа, напр. 15.0 = 1.5%
+        rarity_permille REAL,
         UNIQUE(collection_id, name)
     );
 
@@ -60,8 +54,6 @@ db.exec(`
         UNIQUE(collection_id, name)
     );
 
-    -- Реальные лоты на продажу. Это ОТДЕЛЬНАЯ сущность от каталога трейтов выше:
-    -- каталог — "какие модели вообще бывают", листинги — "что сейчас продаётся".
     CREATE TABLE IF NOT EXISTS listings (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         owner_tg_id INTEGER NOT NULL REFERENCES users(tg_id),
@@ -69,10 +61,10 @@ db.exec(`
         model_id INTEGER REFERENCES gift_models(id),
         backdrop_id INTEGER REFERENCES gift_backdrops(id),
         symbol_id INTEGER REFERENCES gift_symbols(id),
-        gift_number INTEGER NOT NULL,   -- порядковый номер конкретного экземпляра, напр. #56824
-        nft_address TEXT,               -- адрес конкретного NFT в TON, если известен
+        gift_number INTEGER NOT NULL,
+        nft_address TEXT,
         price REAL NOT NULL,
-        status TEXT NOT NULL DEFAULT 'active', -- active | sold | cancelled
+        status TEXT NOT NULL DEFAULT 'active',
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         sold_at TEXT
     );
@@ -80,6 +72,17 @@ db.exec(`
     CREATE INDEX IF NOT EXISTS idx_listings_status ON listings(status);
     CREATE INDEX IF NOT EXISTS idx_listings_collection ON listings(collection_id);
 `);
+
+// === Миграция: у gift_models раньше не было своей картинки (иконки модели).
+// Добавляем колонку, если её ещё нет — на уже существующей базе ALTER TABLE
+// выполнится один раз, на новой базе она попадёт сразу в CREATE TABLE выше
+// (но мы не трогаем CREATE TABLE, чтобы не ломать уже накопленные данные —
+// проще и безопаснее держать миграцию отдельно). ===
+try {
+    db.exec('ALTER TABLE gift_models ADD COLUMN icon_url TEXT');
+} catch (e) {
+    // Колонка уже существует — это нормально, просто игнорируем.
+}
 
 // === Подготовленные запросы: пользователи ===
 const userStatements = {
@@ -135,7 +138,7 @@ function adjustBalance(tgId, delta) {
     return setBalance(tgId, newBalance);
 }
 
-// === Подготовленные запросы: коллекции и каталог трейтов (используется сид-скриптом) ===
+// === Подготовленные запросы: коллекции и каталог трейтов ===
 const catalogStatements = {
     upsertCollection: db.prepare(`
         INSERT INTO collections (ton_address, name, image_url)
@@ -145,10 +148,14 @@ const catalogStatements = {
     findCollectionByAddress: db.prepare('SELECT * FROM collections WHERE ton_address = ?'),
     listCollections: db.prepare('SELECT * FROM collections ORDER BY name'),
 
+    // icon_url добавлен после ALTER TABLE выше — если сид-скрипт его не передаёт,
+    // просто останется NULL, и фронт покажет заглушку вместо иконки.
     upsertModel: db.prepare(`
-        INSERT INTO gift_models (collection_id, name, rarity_permille)
-        VALUES (@collection_id, @name, @rarity_permille)
-        ON CONFLICT(collection_id, name) DO UPDATE SET rarity_permille = excluded.rarity_permille
+        INSERT INTO gift_models (collection_id, name, rarity_permille, icon_url)
+        VALUES (@collection_id, @name, @rarity_permille, @icon_url)
+        ON CONFLICT(collection_id, name) DO UPDATE SET
+            rarity_permille = excluded.rarity_permille,
+            icon_url = COALESCE(excluded.icon_url, gift_models.icon_url)
     `),
     upsertBackdrop: db.prepare(`
         INSERT INTO gift_backdrops (collection_id, name, color_hex, rarity_permille)
@@ -165,11 +172,21 @@ const catalogStatements = {
     backdropsByCollection: db.prepare('SELECT * FROM gift_backdrops WHERE collection_id = ? ORDER BY name'),
     symbolsByCollection: db.prepare('SELECT * FROM gift_symbols WHERE collection_id = ? ORDER BY name'),
 
-    // Уникальные названия по ВСЕМ коллекциям сразу — для фильтров, когда
-    // конкретная коллекция ещё не выбрана (сужаем список, только если выбрали "NFT").
-    allModelNames: db.prepare('SELECT DISTINCT name FROM gift_models ORDER BY name'),
-    allBackdropNames: db.prepare('SELECT DISTINCT name FROM gift_backdrops ORDER BY name'),
-    allSymbolNames: db.prepare('SELECT DISTINCT name FROM gift_symbols ORDER BY name'),
+    // Агрегированные по названию трейты по ВСЕМ коллекциям — для фильтров,
+    // пока ни одна коллекция ещё не выбрана. Берём любую доступную иконку/цвет
+    // и максимальный процент редкости среди одноимённых трейтов разных коллекций.
+    allModelsAgg: db.prepare(`
+        SELECT name, MAX(icon_url) AS icon_url, MAX(rarity_permille) AS rarity_permille
+        FROM gift_models GROUP BY name ORDER BY name
+    `),
+    allBackdropsAgg: db.prepare(`
+        SELECT name, MAX(color_hex) AS color_hex, MAX(rarity_permille) AS rarity_permille
+        FROM gift_backdrops GROUP BY name ORDER BY name
+    `),
+    allSymbolsAgg: db.prepare(`
+        SELECT name, MAX(icon_url) AS icon_url, MAX(rarity_permille) AS rarity_permille
+        FROM gift_symbols GROUP BY name ORDER BY name
+    `),
 };
 
 function upsertCollection({ ton_address, name, image_url }) {
@@ -181,8 +198,10 @@ function listCollections() {
     return catalogStatements.listCollections.all();
 }
 
-function upsertModel(collection_id, name, rarity_permille) {
-    catalogStatements.upsertModel.run({ collection_id, name, rarity_permille: rarity_permille ?? null });
+// icon_url — необязательный 4-й параметр, чтобы не сломать вызовы,
+// написанные до появления иконок у моделей.
+function upsertModel(collection_id, name, rarity_permille, icon_url = null) {
+    catalogStatements.upsertModel.run({ collection_id, name, rarity_permille: rarity_permille ?? null, icon_url });
 }
 
 function upsertBackdrop(collection_id, name, color_hex, rarity_permille) {
@@ -204,13 +223,45 @@ function getFiltersForCollection(collection_id) {
 /** Уникальные модели/фоны/символы по всем коллекциям — для фильтров по умолчанию. */
 function getAllFilters() {
     return {
-        models: catalogStatements.allModelNames.all(),
-        backdrops: catalogStatements.allBackdropNames.all(),
-        symbols: catalogStatements.allSymbolNames.all(),
+        models: catalogStatements.allModelsAgg.all(),
+        backdrops: catalogStatements.allBackdropsAgg.all(),
+        symbols: catalogStatements.allSymbolsAgg.all(),
     };
 }
 
-// === Подготовленные запросы: листинги (реальные лоты на продажу) ===
+/**
+ * То же самое, но суженное до конкретного набора коллекций — когда в
+ * фильтре "NFT" выбрано несколько коллекций сразу. Пустой/отсутствующий
+ * массив collectionIds означает "по всем коллекциям" (как getAllFilters).
+ */
+function getFiltersForCollections(collectionIds) {
+    if (!collectionIds || collectionIds.length === 0) {
+        return getAllFilters();
+    }
+
+    const placeholders = collectionIds.map((_, i) => `@id${i}`).join(', ');
+    const params = {};
+    collectionIds.forEach((id, i) => { params[`id${i}`] = id; });
+
+    const models = db.prepare(`
+        SELECT name, MAX(icon_url) AS icon_url, MAX(rarity_permille) AS rarity_permille
+        FROM gift_models WHERE collection_id IN (${placeholders}) GROUP BY name ORDER BY name
+    `).all(params);
+
+    const backdrops = db.prepare(`
+        SELECT name, MAX(color_hex) AS color_hex, MAX(rarity_permille) AS rarity_permille
+        FROM gift_backdrops WHERE collection_id IN (${placeholders}) GROUP BY name ORDER BY name
+    `).all(params);
+
+    const symbols = db.prepare(`
+        SELECT name, MAX(icon_url) AS icon_url, MAX(rarity_permille) AS rarity_permille
+        FROM gift_symbols WHERE collection_id IN (${placeholders}) GROUP BY name ORDER BY name
+    `).all(params);
+
+    return { models, backdrops, symbols };
+}
+
+// === Подготовленные запросы: листинги ===
 const listingStatements = {
     insert: db.prepare(`
         INSERT INTO listings (owner_tg_id, collection_id, model_id, backdrop_id, symbol_id, gift_number, nft_address, price)
@@ -235,30 +286,28 @@ function setListingStatus(id, status) {
 }
 
 /**
- * Гибкая выборка активных листингов с join'ом на названия трейтов —
- * ровно то, что нужно фронту для карточек и фильтров.
- * filters: { collectionId, modelName, backdropName, symbolName, search, sort }
+ * Гибкая выборка активных листингов. Теперь каждый из фильтров может быть
+ * МАССИВОМ значений (мультивыбор) — например collectionIds: [1, 3, 7]
+ * или modelNames: ['Anniversary', 'Backyard']. Пустой/отсутствующий массив
+ * означает "без ограничения по этому полю".
+ * filters: { collectionIds, modelNames, backdropNames, symbolNames, search, sort }
  */
 function findListings(filters = {}) {
     const where = [`l.status = 'active'`];
     const params = {};
 
-    if (filters.collectionId) {
-        where.push('l.collection_id = @collectionId');
-        params.collectionId = filters.collectionId;
+    function addInClause(column, values, prefix) {
+        if (!values || values.length === 0) return;
+        const placeholders = values.map((_, i) => `@${prefix}${i}`).join(', ');
+        values.forEach((v, i) => { params[`${prefix}${i}`] = v; });
+        where.push(`${column} IN (${placeholders})`);
     }
-    if (filters.modelName) {
-        where.push('gm.name = @modelName');
-        params.modelName = filters.modelName;
-    }
-    if (filters.backdropName) {
-        where.push('gb.name = @backdropName');
-        params.backdropName = filters.backdropName;
-    }
-    if (filters.symbolName) {
-        where.push('gs.name = @symbolName');
-        params.symbolName = filters.symbolName;
-    }
+
+    addInClause('l.collection_id', filters.collectionIds, 'col');
+    addInClause('gm.name', filters.modelNames, 'mod');
+    addInClause('gb.name', filters.backdropNames, 'bg');
+    addInClause('gs.name', filters.symbolNames, 'sym');
+
     if (filters.search) {
         where.push('c.name LIKE @search');
         params.search = `%${filters.search}%`;
@@ -278,7 +327,7 @@ function findListings(filters = {}) {
         SELECT
             l.id, l.price, l.gift_number, l.nft_address, l.status, l.created_at, l.owner_tg_id,
             c.id AS collection_id, c.name AS collection_name, c.image_url AS collection_image,
-            gm.name AS model_name,
+            gm.name AS model_name, gm.icon_url AS model_icon,
             gb.name AS backdrop_name, gb.color_hex AS backdrop_color,
             gs.name AS symbol_name, gs.icon_url AS symbol_icon
         FROM listings l
@@ -306,6 +355,7 @@ module.exports = {
     upsertSymbol,
     getFiltersForCollection,
     getAllFilters,
+    getFiltersForCollections,
     createListing,
     getListingById,
     setListingStatus,
