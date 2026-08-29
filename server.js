@@ -233,6 +233,10 @@ app.post('/api/listings', requireAuth, (req, res) => {
     res.json({ ok: true, listing });
 });
 
+// Комиссия маркетплейса при покупке — площадка удерживает эту долю,
+// продавец получает цену за вычетом комиссии.
+const MARKETPLACE_FEE_PERCENT = 1.5;
+
 // === Купить лот (только не собственный, только пока статус active) ===
 app.post('/api/listings/:id/buy', requireAuth, (req, res) => {
     const listing = getListingById(parseInt(req.params.id, 10));
@@ -249,16 +253,16 @@ app.post('/api/listings/:id/buy', requireAuth, (req, res) => {
 
     let buyer;
     try {
-        // Списываем у покупателя — adjustBalance сама бросит ошибку, если средств не хватает.
+        // Списываем у покупателя полную цену — adjustBalance сама бросит ошибку,
+        // если средств не хватает.
         buyer = adjustBalance(req.tgId, -listing.price);
     } catch (e) {
         return res.status(400).json({ ok: false, error: 'Недостаточно средств на балансе' });
     }
 
-    // Зачисляем продавцу и помечаем лот проданным. Если что-то из этого упадёт —
-    // деньги у покупателя уже списаны; для демо-версии это допустимый риск,
-    // в проде это место стоит обернуть в транзакцию с откатом.
-    adjustBalance(listing.owner_tg_id, listing.price);
+    // Продавцу зачисляем цену за вычетом комиссии маркетплейса.
+    const sellerPayout = listing.price * (1 - MARKETPLACE_FEE_PERCENT / 100);
+    adjustBalance(listing.owner_tg_id, sellerPayout);
     const updatedListing = setListingStatus(listing.id, 'sold');
 
     res.json({ ok: true, balance: buyer.balance, listing: updatedListing });

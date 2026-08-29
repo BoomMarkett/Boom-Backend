@@ -350,9 +350,9 @@ function findListings(filters = {}) {
         SELECT
             l.id, l.price, l.gift_number, l.nft_address, l.status, l.created_at, l.owner_tg_id,
             c.id AS collection_id, c.name AS collection_name, c.image_url AS collection_image,
-            gm.name AS model_name, gm.image_url AS model_icon,
-            gb.name AS backdrop_name, gb.color_hex AS backdrop_color,
-            gs.name AS symbol_name, gs.icon_url AS symbol_icon
+            gm.name AS model_name, gm.image_url AS model_icon, gm.rarity_permille AS model_rarity,
+            gb.name AS backdrop_name, gb.color_hex AS backdrop_color, gb.rarity_permille AS backdrop_rarity,
+            gs.name AS symbol_name, gs.icon_url AS symbol_icon, gs.rarity_permille AS symbol_rarity
         FROM listings l
         JOIN collections c ON c.id = l.collection_id
         LEFT JOIN gift_models gm ON gm.id = l.model_id
