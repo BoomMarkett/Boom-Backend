@@ -32,6 +32,15 @@ if (!JWT_SECRET) {
 
 const TOKEN_LIFETIME = '24h';
 
+// Проверяет, что сумма — число от 0.1 до 100000 с не более чем одним знаком
+// после запятой (0.2, 1.4, 10.7, 10 — можно; 1.76, 9.87 — нельзя).
+function isValidAmount(amount) {
+    if (typeof amount !== 'number' || isNaN(amount) || !isFinite(amount)) return false;
+    if (amount < 0.1 || amount > 100000) return false;
+    const tenths = Math.round(amount * 10);
+    return Math.abs(tenths - amount * 10) < 1e-6;
+}
+
 function checkTelegramAuth(initData) {
     try {
         const params = new URLSearchParams(initData);
@@ -136,8 +145,8 @@ app.get('/api/balance', requireAuth, (req, res) => {
 app.post('/api/deposit', requireAuth, (req, res) => {
     const amount = parseFloat(req.body.amount);
 
-    if (!amount || amount < 0.01) {
-        return res.status(400).json({ ok: false, error: 'Минимальная сумма для пополнения: 0.01' });
+    if (!isValidAmount(amount)) {
+        return res.status(400).json({ ok: false, error: 'Сумма должна быть от 0.1 до 100000, максимум с одним знаком после запятой' });
     }
 
     const user = adjustBalance(req.tgId, amount);
@@ -148,8 +157,8 @@ app.post('/api/deposit', requireAuth, (req, res) => {
 app.post('/api/withdraw', requireAuth, (req, res) => {
     const amount = parseFloat(req.body.amount);
 
-    if (!amount || amount < 0.5) {
-        return res.status(400).json({ ok: false, error: 'Минимальная сумма для вывода: 0.5' });
+    if (!isValidAmount(amount)) {
+        return res.status(400).json({ ok: false, error: 'Сумма должна быть от 0.1 до 100000, максимум с одним знаком после запятой' });
     }
 
     try {
