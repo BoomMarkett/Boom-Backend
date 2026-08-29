@@ -32,11 +32,11 @@ if (!JWT_SECRET) {
 
 const TOKEN_LIFETIME = '24h';
 
-// Проверяет, что сумма — число от 0.1 до 100000 с не более чем одним знаком
-// после запятой (0.2, 1.4, 10.7, 10 — можно; 1.76, 9.87 — нельзя).
-function isValidAmount(amount) {
+// Проверяет, что сумма — число в заданном диапазоне с не более чем одним
+// знаком после запятой (0.2, 1.4, 10.7, 10 — можно; 1.76, 9.87 — нельзя).
+function isValidAmount(amount, min = 0.1, max = 100000) {
     if (typeof amount !== 'number' || isNaN(amount) || !isFinite(amount)) return false;
-    if (amount < 0.1 || amount > 100000) return false;
+    if (amount < min || amount > max) return false;
     const tenths = Math.round(amount * 10);
     return Math.abs(tenths - amount * 10) < 1e-6;
 }
@@ -157,12 +157,9 @@ app.post('/api/deposit', requireAuth, (req, res) => {
 app.post('/api/withdraw', requireAuth, (req, res) => {
     const amount = parseFloat(req.body.amount);
 
-    if (!isValidAmount(amount)) {
-        return res.status(400).json({ ok: false, error: 'Сумма должна быть от 0.1 до 100000, максимум с одним знаком после запятой' });
+    if (!isValidAmount(amount, 0.5, 100000)) {
+        return res.status(400).json({ ok: false, error: 'Сумма должна быть от 0.5 до 100000, максимум с одним знаком после запятой' });
     }
-
-    try {
-        const user = adjustBalance(req.tgId, -amount);
         res.json({ ok: true, balance: user.balance });
     } catch (e) {
         res.status(400).json({ ok: false, error: e.message });
