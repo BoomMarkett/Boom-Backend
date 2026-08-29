@@ -215,16 +215,16 @@ app.post('/api/listings', requireAuth, (req, res) => {
     const { collectionId, modelId, backdropId, symbolId, giftNumber, nftAddress, price } = req.body;
 
     const parsedPrice = parseFloat(price);
-    if (!collectionId || !giftNumber || !parsedPrice || parsedPrice <= 0) {
+    if (!collectionId || !modelId || !backdropId || !symbolId || !giftNumber || !parsedPrice || parsedPrice <= 0) {
         return res.status(400).json({ ok: false, error: 'Заполнены не все обязательные поля' });
     }
 
     const listing = createListing({
         owner_tg_id: req.tgId,
         collection_id: collectionId,
-        model_id: modelId || null,
-        backdrop_id: backdropId || null,
-        symbol_id: symbolId || null,
+        model_id: modelId,
+        backdrop_id: backdropId,
+        symbol_id: symbolId,
         gift_number: giftNumber,
         nft_address: nftAddress || null,
         price: parsedPrice,
