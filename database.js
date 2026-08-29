@@ -1,8 +1,13 @@
 const Database = require('better-sqlite3');
 const path = require('path');
 
-// Файл базы данных лежит рядом с server.js — при первом запуске создастся сам
-const db = new Database(path.join(__dirname, 'boommarket.db'));
+// Файл базы данных. По умолчанию (локальная разработка) — рядом с server.js.
+// На Railway задаём DB_PATH через переменную окружения, указывая на смонтированный
+// постоянный диск (Volume) — иначе при каждом редеплое контейнер пересоздаётся
+// с нуля, и вся база (пользователи, баланс, коллекции, листинги) стирается.
+const dbPath = process.env.DB_PATH || path.join(__dirname, 'boommarket.db');
+const db = new Database(dbPath);
+console.log(`База данных: ${dbPath}`);
 
 // Небольшой прирост производительности и надёжности для SQLite
 db.pragma('journal_mode = WAL');
