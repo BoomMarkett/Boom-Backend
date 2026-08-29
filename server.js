@@ -160,6 +160,9 @@ app.post('/api/withdraw', requireAuth, (req, res) => {
     if (!isValidAmount(amount, 0.5, 100000)) {
         return res.status(400).json({ ok: false, error: 'Сумма должна быть от 0.5 до 100000, максимум с одним знаком после запятой' });
     }
+
+    try {
+        const user = adjustBalance(req.tgId, -amount);
         res.json({ ok: true, balance: user.balance });
     } catch (e) {
         res.status(400).json({ ok: false, error: e.message });
