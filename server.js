@@ -11,8 +11,11 @@ const {
     getAllFilters,
     findListings,
     getListingById,
+    getListingWithDetails,
     createListing,
     setListingStatus,
+    createTransaction,
+    listTransactionsForUser,
 } = require('./database');
 
 const app = express();
@@ -150,6 +153,7 @@ app.post('/api/deposit', requireAuth, (req, res) => {
     }
 
     const user = adjustBalance(req.tgId, amount);
+    createTransaction({ tg_id: req.tgId, type: 'deposit', amount });
     res.json({ ok: true, balance: user.balance });
 });
 
@@ -163,6 +167,7 @@ app.post('/api/withdraw', requireAuth, (req, res) => {
 
     try {
         const user = adjustBalance(req.tgId, -amount);
+        createTransaction({ tg_id: req.tgId, type: 'withdraw', amount: -amount });
         res.json({ ok: true, balance: user.balance });
     } catch (e) {
         res.status(400).json({ ok: false, error: e.message });
@@ -248,7 +253,7 @@ const MARKETPLACE_FEE_PERCENT = 1.5;
 
 // === Купить лот (только не собственный, только пока статус active) ===
 app.post('/api/listings/:id/buy', requireAuth, (req, res) => {
-    const listing = getListingById(parseInt(req.params.id, 10));
+    const listing = getListingWithDetails(parseInt(req.params.id, 10));
 
     if (!listing) {
         return res.status(404).json({ ok: false, error: 'Листинг не найден' });
@@ -274,7 +279,30 @@ app.post('/api/listings/:id/buy', requireAuth, (req, res) => {
     adjustBalance(listing.owner_tg_id, sellerPayout);
     const updatedListing = setListingStatus(listing.id, 'sold');
 
+    // Записываем обе стороны сделки в историю — снимок данных подарка берём
+    // из listing (не из updatedListing, там только сырые поля без JOIN).
+    const giftSnapshot = {
+        listing_id: listing.id,
+        collection_name: listing.collection_name,
+        collection_image: listing.collection_image,
+        model_name: listing.model_name,
+        model_image: listing.model_image,
+        backdrop_name: listing.backdrop_name,
+        backdrop_color: listing.backdrop_color,
+        symbol_name: listing.symbol_name,
+        symbol_icon: listing.symbol_icon,
+        gift_number: listing.gift_number,
+    };
+    createTransaction({ tg_id: req.tgId, type: 'buy', amount: -listing.price, ...giftSnapshot });
+    createTransaction({ tg_id: listing.owner_tg_id, type: 'sell', amount: sellerPayout, ...giftSnapshot });
+
     res.json({ ok: true, balance: buyer.balance, listing: updatedListing });
+});
+
+// === История операций пользователя (пополнения, выводы, покупки, продажи) ===
+app.get('/api/history', requireAuth, (req, res) => {
+    const history = listTransactionsForUser(req.tgId);
+    res.json({ ok: true, history });
 });
 
 // === Снять лот с продажи (только владелец) ===

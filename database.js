@@ -86,6 +86,30 @@ db.exec(`
 
     CREATE INDEX IF NOT EXISTS idx_listings_status ON listings(status);
     CREATE INDEX IF NOT EXISTS idx_listings_collection ON listings(collection_id);
+
+    -- История операций пользователя (для экрана "История"): пополнения, выводы,
+    -- покупки и продажи NFT. Данные о подарке денормализованы (снимок на момент
+    -- операции), а не через JOIN на listings — так карточка в истории остаётся
+    -- верной, даже если позже сам листинг/трейты поменяются или лот исчезнет.
+    CREATE TABLE IF NOT EXISTS transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tg_id INTEGER NOT NULL REFERENCES users(tg_id),
+        type TEXT NOT NULL,             -- deposit | withdraw | buy | sell
+        amount REAL NOT NULL,           -- знак: + получено (пополнение/продажа), - потрачено (вывод/покупка)
+        listing_id INTEGER REFERENCES listings(id),
+        collection_name TEXT,
+        collection_image TEXT,
+        model_name TEXT,
+        model_image TEXT,
+        backdrop_name TEXT,
+        backdrop_color TEXT,
+        symbol_name TEXT,
+        symbol_icon TEXT,
+        gift_number INTEGER,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_transactions_tg_id ON transactions(tg_id, created_at DESC);
 `);
 
 // === Миграция: добавляем новые колонки в уже существующую базу ===
@@ -289,6 +313,25 @@ function getListingById(id) {
     return listingStatements.findById.get(id);
 }
 
+/** Как getListingById, но с названиями/картинками трейтов через JOIN (без ограничения
+ * по статусу) — нужно для снимка данных подарка при записи операции в историю. */
+function getListingWithDetails(id) {
+    return db.prepare(`
+        SELECT
+            l.id, l.price, l.gift_number, l.nft_address, l.status, l.created_at, l.owner_tg_id,
+            c.id AS collection_id, c.name AS collection_name, c.image_url AS collection_image,
+            gm.name AS model_name, gm.image_url AS model_image, gm.rarity_permille AS model_rarity,
+            gb.name AS backdrop_name, gb.color_hex AS backdrop_color, gb.rarity_permille AS backdrop_rarity,
+            gs.name AS symbol_name, gs.icon_url AS symbol_icon, gs.rarity_permille AS symbol_rarity
+        FROM listings l
+        JOIN collections c ON c.id = l.collection_id
+        LEFT JOIN gift_models gm ON gm.id = l.model_id
+        LEFT JOIN gift_backdrops gb ON gb.id = l.backdrop_id
+        LEFT JOIN gift_symbols gs ON gs.id = l.symbol_id
+        WHERE l.id = ?
+    `).get(id);
+}
+
 function setListingStatus(id, status) {
     listingStatements.setStatus.run(status, status, id);
     return getListingById(id);
@@ -365,6 +408,58 @@ function findListings(filters = {}) {
     return db.prepare(sql).all(params);
 }
 
+// === Подготовленные запросы: история операций (пополнения/выводы/покупки/продажи) ===
+const transactionStatements = {
+    insert: db.prepare(`
+        INSERT INTO transactions (
+            tg_id, type, amount, listing_id,
+            collection_name, collection_image,
+            model_name, model_image,
+            backdrop_name, backdrop_color,
+            symbol_name, symbol_icon,
+            gift_number
+        ) VALUES (
+            @tg_id, @type, @amount, @listing_id,
+            @collection_name, @collection_image,
+            @model_name, @model_image,
+            @backdrop_name, @backdrop_color,
+            @symbol_name, @symbol_icon,
+            @gift_number
+        )
+    `),
+    listByUser: db.prepare('SELECT * FROM transactions WHERE tg_id = ? ORDER BY created_at DESC, id DESC'),
+};
+
+/**
+ * Записывает одну операцию в историю пользователя.
+ * data: { tg_id, type: 'deposit'|'withdraw'|'buy'|'sell', amount, listing_id?,
+ *         collection_name?, collection_image?, model_name?, model_image?,
+ *         backdrop_name?, backdrop_color?, symbol_name?, symbol_icon?, gift_number? }
+ * Поля подарка необязательны — для deposit/withdraw их просто не передают (останутся NULL).
+ */
+function createTransaction(data) {
+    const info = transactionStatements.insert.run({
+        tg_id: data.tg_id,
+        type: data.type,
+        amount: data.amount,
+        listing_id: data.listing_id ?? null,
+        collection_name: data.collection_name ?? null,
+        collection_image: data.collection_image ?? null,
+        model_name: data.model_name ?? null,
+        model_image: data.model_image ?? null,
+        backdrop_name: data.backdrop_name ?? null,
+        backdrop_color: data.backdrop_color ?? null,
+        symbol_name: data.symbol_name ?? null,
+        symbol_icon: data.symbol_icon ?? null,
+        gift_number: data.gift_number ?? null,
+    });
+    return info.lastInsertRowid;
+}
+
+function listTransactionsForUser(tgId) {
+    return transactionStatements.listByUser.all(tgId);
+}
+
 module.exports = {
     db,
     findOrCreateUser,
@@ -380,6 +475,9 @@ module.exports = {
     getAllFilters,
     createListing,
     getListingById,
+    getListingWithDetails,
     setListingStatus,
     findListings,
+    createTransaction,
+    listTransactionsForUser,
 };
