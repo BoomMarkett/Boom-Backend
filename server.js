@@ -233,6 +233,37 @@ app.post('/api/listings', requireAuth, (req, res) => {
     res.json({ ok: true, listing });
 });
 
+// === Купить лот (только не собственный, только пока статус active) ===
+app.post('/api/listings/:id/buy', requireAuth, (req, res) => {
+    const listing = getListingById(parseInt(req.params.id, 10));
+
+    if (!listing) {
+        return res.status(404).json({ ok: false, error: 'Листинг не найден' });
+    }
+    if (listing.status !== 'active') {
+        return res.status(400).json({ ok: false, error: 'Этот лот уже продан или снят с продажи' });
+    }
+    if (listing.owner_tg_id === req.tgId) {
+        return res.status(400).json({ ok: false, error: 'Нельзя купить собственный лот' });
+    }
+
+    let buyer;
+    try {
+        // Списываем у покупателя — adjustBalance сама бросит ошибку, если средств не хватает.
+        buyer = adjustBalance(req.tgId, -listing.price);
+    } catch (e) {
+        return res.status(400).json({ ok: false, error: 'Недостаточно средств на балансе' });
+    }
+
+    // Зачисляем продавцу и помечаем лот проданным. Если что-то из этого упадёт —
+    // деньги у покупателя уже списаны; для демо-версии это допустимый риск,
+    // в проде это место стоит обернуть в транзакцию с откатом.
+    adjustBalance(listing.owner_tg_id, listing.price);
+    const updatedListing = setListingStatus(listing.id, 'sold');
+
+    res.json({ ok: true, balance: buyer.balance, listing: updatedListing });
+});
+
 // === Снять лот с продажи (только владелец) ===
 app.delete('/api/listings/:id', requireAuth, (req, res) => {
     const listing = getListingById(parseInt(req.params.id, 10));
