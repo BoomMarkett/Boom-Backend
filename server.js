@@ -335,6 +335,76 @@ app.post('/api/inventory/add', requireAuth, (req, res) => {
     res.json({ ok: true, listing });
 });
 
+// =====================================================================
+// ИГРА "СЛОТЫ"
+// =====================================================================
+
+// Символы барабана и их "вес" — насколько часто они выпадают на одном
+// барабане (не шанс всей комбинации!). Редкие символы дают больший
+// множитель, поэтому и выпадают реже.
+const SLOTS_SYMBOLS = [
+    { id: 'cherry', weight: 38, multiplier: 2 },
+    { id: 'lemon', weight: 38, multiplier: 2 },
+    { id: 'seven', weight: 17, multiplier: 2.5 },
+    { id: 'diamond', weight: 7, multiplier: 3 },
+];
+const SLOTS_TOTAL_WEIGHT = SLOTS_SYMBOLS.reduce((sum, s) => sum + s.weight, 0);
+const SLOTS_MIN_BET = 0.3;
+const SLOTS_MAX_BET = 10000;
+
+function spinReel() {
+    let roll = Math.random() * SLOTS_TOTAL_WEIGHT;
+    for (const symbol of SLOTS_SYMBOLS) {
+        if (roll < symbol.weight) return symbol.id;
+        roll -= symbol.weight;
+    }
+    return SLOTS_SYMBOLS[SLOTS_SYMBOLS.length - 1].id;
+}
+
+// === Крутануть слоты: ставка списывается сразу, выигрыш (если есть)
+// начисляется в этом же ответе — считаем всё на сервере, чтобы клиент
+// не мог подделать результат или множитель ===
+app.post('/api/games/slots/spin', requireAuth, (req, res) => {
+    const bet = parseFloat(req.body.bet);
+
+    if (!isValidAmount(bet, SLOTS_MIN_BET, SLOTS_MAX_BET)) {
+        return res.status(400).json({
+            ok: false,
+            error: `Ставка должна быть от ${SLOTS_MIN_BET} до ${SLOTS_MAX_BET} TON, максимум с одним знаком после запятой`,
+        });
+    }
+
+    const reels = [spinReel(), spinReel(), spinReel()];
+    const isWin = reels[0] === reels[1] && reels[1] === reels[2];
+    const winSymbol = SLOTS_SYMBOLS.find(s => s.id === reels[0]);
+    const multiplier = isWin ? winSymbol.multiplier : 0;
+    const winAmount = isWin ? Math.round(bet * multiplier * 100) / 100 : 0;
+
+    // Одна операция с балансом: -ставка, +выигрыш (0, если проигрыш) —
+    // без промежуточного шага, чтобы не оставлять пользователя "в минусе"
+    // между списанием и начислением, если запросы пойдут параллельно.
+    const netDelta = Math.round((winAmount - bet) * 100) / 100;
+
+    let user;
+    try {
+        user = adjustBalance(req.tgId, netDelta);
+    } catch (e) {
+        return res.status(400).json({ ok: false, error: 'Недостаточно средств на балансе' });
+    }
+
+    createTransaction({ tg_id: req.tgId, type: 'game_slots', amount: netDelta });
+
+    res.json({
+        ok: true,
+        reels,
+        win: isWin,
+        multiplier: isWin ? multiplier : null,
+        betAmount: bet,
+        winAmount,
+        balance: user.balance,
+    });
+});
+
 // === Создать ордер на покупку (сумма сразу резервируется на балансе) ===
 app.post('/api/orders', requireAuth, (req, res) => {
     const { collectionId, modelId, backdropId, symbolId, maxPrice } = req.body;
