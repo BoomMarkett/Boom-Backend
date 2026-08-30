@@ -579,6 +579,29 @@ function findMatchingOrder(listing) {
     });
 }
 
+/**
+ * Возвращает ВСЕ активные ордера, подходящие под конкретный листинг (та же
+ * логика совпадения трейтов, что и при мгновенном матче на создание лота),
+ * но БЕЗ фильтра по цене — продавцу нужно видеть все предложения на этот
+ * трейт, в том числе ниже цены лота, чтобы самому решить, принимать ли.
+ */
+function findMatchingOrdersForListing(listing) {
+    return db.prepare(`
+        SELECT * FROM orders
+        WHERE status = 'active'
+          AND collection_id = @collection_id
+          AND (model_id IS NULL OR model_id = @model_id)
+          AND (backdrop_id IS NULL OR backdrop_id = @backdrop_id)
+          AND (symbol_id IS NULL OR symbol_id = @symbol_id)
+        ORDER BY max_price DESC, created_at ASC
+    `).all({
+        collection_id: listing.collection_id,
+        model_id: listing.model_id,
+        backdrop_id: listing.backdrop_id,
+        symbol_id: listing.symbol_id,
+    });
+}
+
 module.exports = {
     db,
     findOrCreateUser,
@@ -606,4 +629,5 @@ module.exports = {
     listActiveOrdersForUser,
     listOrderHistoryForUser,
     findMatchingOrder,
+    findMatchingOrdersForListing,
 };

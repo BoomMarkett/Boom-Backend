@@ -23,6 +23,7 @@ const {
     listActiveOrdersForUser,
     listOrderHistoryForUser,
     findMatchingOrder,
+    findMatchingOrdersForListing,
 } = require('./database');
 
 const app = express();
@@ -427,6 +428,85 @@ app.delete('/api/listings/:id', requireAuth, (req, res) => {
 
     const updated = setListingStatus(listing.id, 'cancelled');
     res.json({ ok: true, listing: updated });
+});
+
+// === Предложения (активные ордера на покупку), подходящие под конкретный лот —
+// видит только владелец, чтобы решить, продать ли дешевле рыночной цены ===
+app.get('/api/listings/:id/offers', requireAuth, (req, res) => {
+    const listing = getListingById(parseInt(req.params.id, 10));
+
+    if (!listing) {
+        return res.status(404).json({ ok: false, error: 'Листинг не найден' });
+    }
+    if (listing.owner_tg_id !== req.tgId) {
+        return res.status(403).json({ ok: false, error: 'Это не ваш листинг' });
+    }
+
+    const offers = findMatchingOrdersForListing(listing);
+    res.json({ ok: true, offers });
+});
+
+// === Продать лот конкретному ордеру-предложению (владелец сам выбирает,
+// принять ли предложение — в том числе ниже своей цены) ===
+app.post('/api/listings/:id/accept-offer', requireAuth, (req, res) => {
+    const listing = getListingById(parseInt(req.params.id, 10));
+
+    if (!listing) {
+        return res.status(404).json({ ok: false, error: 'Листинг не найден' });
+    }
+    if (listing.owner_tg_id !== req.tgId) {
+        return res.status(403).json({ ok: false, error: 'Это не ваш листинг' });
+    }
+    if (listing.status !== 'active') {
+        return res.status(400).json({ ok: false, error: 'Листинг уже неактивен' });
+    }
+
+    const orderId = parseInt(req.body.orderId, 10);
+    const order = getOrderById(orderId);
+
+    if (!order || order.status !== 'active') {
+        return res.status(400).json({ ok: false, error: 'Это предложение больше недоступно' });
+    }
+    // Перепроверяем совпадение трейтов на сервере — не доверяем orderId с фронта вслепую.
+    if (order.collection_id !== listing.collection_id) {
+        return res.status(400).json({ ok: false, error: 'Предложение не подходит под этот лот' });
+    }
+    if (order.model_id && order.model_id !== listing.model_id) {
+        return res.status(400).json({ ok: false, error: 'Предложение не подходит под этот лот' });
+    }
+    if (order.backdrop_id && order.backdrop_id !== listing.backdrop_id) {
+        return res.status(400).json({ ok: false, error: 'Предложение не подходит под этот лот' });
+    }
+    if (order.symbol_id && order.symbol_id !== listing.symbol_id) {
+        return res.status(400).json({ ok: false, error: 'Предложение не подходит под этот лот' });
+    }
+
+    // Деньги покупателя уже зарезервированы на его балансе при создании ордера —
+    // сделка проходит ровно по цене предложения (order.max_price), продавец
+    // получает её за вычетом комиссии.
+    const sellerPayout = order.max_price * (1 - MARKETPLACE_FEE_PERCENT / 100);
+    const seller = adjustBalance(req.tgId, sellerPayout);
+
+    const soldListing = setListingStatus(listing.id, 'sold');
+    setOrderStatus(order.id, 'filled', listing.id);
+
+    const details = getListingWithDetails(listing.id);
+    const giftSnapshot = {
+        listing_id: listing.id,
+        collection_name: details.collection_name,
+        collection_image: details.collection_image,
+        model_name: details.model_name,
+        model_image: details.model_image,
+        backdrop_name: details.backdrop_name,
+        backdrop_color: details.backdrop_color,
+        symbol_name: details.symbol_name,
+        symbol_icon: details.symbol_icon,
+        gift_number: details.gift_number,
+    };
+    createTransaction({ tg_id: order.buyer_tg_id, type: 'buy', amount: -order.max_price, ...giftSnapshot });
+    createTransaction({ tg_id: req.tgId, type: 'sell', amount: sellerPayout, ...giftSnapshot });
+
+    res.json({ ok: true, listing: soldListing, balance: seller.balance });
 });
 
 app.get('/', (req, res) => {
