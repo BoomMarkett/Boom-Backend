@@ -13,7 +13,10 @@ const {
     getListingById,
     getListingWithDetails,
     createListing,
-    setListingStatus,
+    transferListingToBuyer,
+    returnListingToOwnerStorage,
+    relistOwnedItem,
+    listOwnedItemsForUser,
     createTransaction,
     listTransactionsForUser,
     createOrder,
@@ -272,10 +275,12 @@ app.post('/api/listings', requireAuth, (req, res) => {
             adjustBalance(matchedOrder.buyer_tg_id, refund);
         }
 
-        const soldListing = setListingStatus(listing.id, 'sold');
+        // Товар переходит покупателю и оседает в его "Хранилище" — а не просто
+        // помечается "sold" с прежним владельцем.
+        const details = getListingWithDetails(listing.id);
+        const soldListing = transferListingToBuyer(listing.id, matchedOrder.buyer_tg_id);
         setOrderStatus(matchedOrder.id, 'filled', listing.id);
 
-        const details = getListingWithDetails(listing.id);
         const giftSnapshot = {
             listing_id: listing.id,
             collection_name: details.collection_name,
@@ -383,8 +388,10 @@ app.post('/api/listings/:id/buy', requireAuth, (req, res) => {
 
     // Продавцу зачисляем цену за вычетом комиссии маркетплейса.
     const sellerPayout = listing.price * (1 - MARKETPLACE_FEE_PERCENT / 100);
-    adjustBalance(listing.owner_tg_id, sellerPayout);
-    const updatedListing = setListingStatus(listing.id, 'sold');
+    const sellerTgId = listing.owner_tg_id;
+    adjustBalance(sellerTgId, sellerPayout);
+    // Товар переходит покупателю и оседает в его "Хранилище".
+    const updatedListing = transferListingToBuyer(listing.id, req.tgId);
 
     // Записываем обе стороны сделки в историю — снимок данных подарка берём
     // из listing (не из updatedListing, там только сырые поля без JOIN).
@@ -426,7 +433,72 @@ app.delete('/api/listings/:id', requireAuth, (req, res) => {
         return res.status(400).json({ ok: false, error: 'Листинг уже неактивен' });
     }
 
-    const updated = setListingStatus(listing.id, 'cancelled');
+    // При снятии с продажи товар не исчезает, а возвращается в "Хранилище" владельца.
+    const updated = returnListingToOwnerStorage(listing.id);
+    res.json({ ok: true, listing: updated });
+});
+
+// === Личное "Хранилище": товары пользователя, которые сейчас не выставлены на продажу ===
+app.get('/api/inventory', requireAuth, (req, res) => {
+    const items = listOwnedItemsForUser(req.tgId);
+    res.json({ ok: true, items });
+});
+
+// === Выставить товар из "Хранилища" обратно на продажу (та же запись, новая цена) ===
+app.post('/api/listings/:id/relist', requireAuth, (req, res) => {
+    const listing = getListingById(parseInt(req.params.id, 10));
+
+    if (!listing) {
+        return res.status(404).json({ ok: false, error: 'Товар не найден' });
+    }
+    if (listing.owner_tg_id !== req.tgId) {
+        return res.status(403).json({ ok: false, error: 'Это не ваш товар' });
+    }
+    if (listing.status !== 'owned') {
+        return res.status(400).json({ ok: false, error: 'Этот товар нельзя выставить на продажу' });
+    }
+
+    const parsedPrice = parseFloat(req.body.price);
+    if (!isValidAmount(parsedPrice, 0.01, 1000000)) {
+        return res.status(400).json({ ok: false, error: 'Укажите корректную цену' });
+    }
+
+    const updated = relistOwnedItem(listing.id, parsedPrice);
+
+    // Как и при обычном выставлении лота — если есть подходящий активный ордер,
+    // сделка исполняется мгновенно.
+    const matchedOrder = findMatchingOrder(updated);
+    if (matchedOrder && matchedOrder.buyer_tg_id !== req.tgId) {
+        const sellerPayout = updated.price * (1 - MARKETPLACE_FEE_PERCENT / 100);
+        adjustBalance(req.tgId, sellerPayout);
+
+        const refund = matchedOrder.max_price - updated.price;
+        if (refund > 1e-9) {
+            adjustBalance(matchedOrder.buyer_tg_id, refund);
+        }
+
+        const details = getListingWithDetails(updated.id);
+        const soldListing = transferListingToBuyer(updated.id, matchedOrder.buyer_tg_id);
+        setOrderStatus(matchedOrder.id, 'filled', updated.id);
+
+        const giftSnapshot = {
+            listing_id: updated.id,
+            collection_name: details.collection_name,
+            collection_image: details.collection_image,
+            model_name: details.model_name,
+            model_image: details.model_image,
+            backdrop_name: details.backdrop_name,
+            backdrop_color: details.backdrop_color,
+            symbol_name: details.symbol_name,
+            symbol_icon: details.symbol_icon,
+            gift_number: details.gift_number,
+        };
+        createTransaction({ tg_id: matchedOrder.buyer_tg_id, type: 'buy', amount: -updated.price, ...giftSnapshot });
+        createTransaction({ tg_id: req.tgId, type: 'sell', amount: sellerPayout, ...giftSnapshot });
+
+        return res.json({ ok: true, listing: soldListing, matchedOrder: true });
+    }
+
     res.json({ ok: true, listing: updated });
 });
 
@@ -478,10 +550,10 @@ app.post('/api/listings/:id/accept-offer', requireAuth, (req, res) => {
     const sellerPayout = order.max_price * (1 - MARKETPLACE_FEE_PERCENT / 100);
     const seller = adjustBalance(req.tgId, sellerPayout);
 
-    const soldListing = setListingStatus(listing.id, 'sold');
-    setOrderStatus(order.id, 'filled', listing.id);
-
     const details = getListingWithDetails(listing.id);
+    // Товар переходит покупателю (автору оффера) и оседает в его "Хранилище".
+    const soldListing = transferListingToBuyer(listing.id, order.buyer_tg_id);
+    setOrderStatus(order.id, 'filled', listing.id);
     const giftSnapshot = {
         listing_id: listing.id,
         collection_name: details.collection_name,

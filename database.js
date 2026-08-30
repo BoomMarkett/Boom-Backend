@@ -79,7 +79,12 @@ db.exec(`
         gift_number INTEGER NOT NULL,   -- порядковый номер конкретного экземпляра, напр. #56824
         nft_address TEXT,               -- адрес конкретного NFT в TON, если известен
         price REAL NOT NULL,
-        status TEXT NOT NULL DEFAULT 'active', -- active | sold | cancelled
+        -- active — выставлен на продажу и виден в маркете
+        -- owned — принадлежит owner_tg_id, но не продаётся: лежит в "Хранилище"
+        --         (товар попадает сюда и после покупки, и при снятии с продажи)
+        -- sold/cancelled — оставлены для обратной совместимости со старыми записями,
+        --                   новый код их больше не использует
+        status TEXT NOT NULL DEFAULT 'active', -- active | owned | sold | cancelled
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         sold_at TEXT
     );
@@ -324,6 +329,16 @@ const listingStatements = {
     `),
     findById: db.prepare('SELECT * FROM listings WHERE id = ?'),
     setStatus: db.prepare(`UPDATE listings SET status = ?, sold_at = CASE WHEN ? = 'sold' THEN datetime('now') ELSE sold_at END WHERE id = ?`),
+    // При покупке товар не просто "продан" — он переходит к покупателю и
+    // оседает в его личном "Хранилище" (status = 'owned'), откуда его можно
+    // либо просто держать, либо выставить обратно на продажу через relist.
+    transferToBuyer: db.prepare(`UPDATE listings SET owner_tg_id = ?, status = 'owned', sold_at = datetime('now') WHERE id = ?`),
+    // Возврат владельцу в хранилище — используется при снятии лота с продажи
+    // (раньше товар после отмены просто "исчезал" в статусе cancelled).
+    returnToOwner: db.prepare(`UPDATE listings SET status = 'owned' WHERE id = ?`),
+    // Повторное выставление на продажу уже принадлежащего пользователю товара
+    // (из "Хранилища") — та же запись листинга, новая цена, снова активна.
+    relist: db.prepare(`UPDATE listings SET status = 'active', price = ?, created_at = datetime('now'), sold_at = NULL WHERE id = ?`),
 };
 
 function createListing(data) {
@@ -333,6 +348,42 @@ function createListing(data) {
 
 function getListingById(id) {
     return listingStatements.findById.get(id);
+}
+
+function transferListingToBuyer(id, buyerTgId) {
+    listingStatements.transferToBuyer.run(buyerTgId, id);
+    return getListingById(id);
+}
+
+function returnListingToOwnerStorage(id) {
+    listingStatements.returnToOwner.run(id);
+    return getListingById(id);
+}
+
+function relistOwnedItem(id, price) {
+    listingStatements.relist.run(price, id);
+    return getListingById(id);
+}
+
+/** Товары текущего пользователя, которые ему принадлежат, но сейчас НЕ
+ * выставлены на продажу (лежат в "Хранилище") — те же поля/join'ы, что и
+ * у карточек маркета, чтобы фронт мог переиспользовать те же компоненты. */
+function listOwnedItemsForUser(tgId) {
+    return db.prepare(`
+        SELECT
+            l.id, l.price, l.gift_number, l.nft_address, l.status, l.created_at, l.sold_at, l.owner_tg_id,
+            c.id AS collection_id, c.name AS collection_name, c.image_url AS collection_image,
+            gm.id AS model_id, gm.name AS model_name, gm.image_url AS model_icon, gm.rarity_permille AS model_rarity,
+            gb.id AS backdrop_id, gb.name AS backdrop_name, gb.color_hex AS backdrop_color, gb.rarity_permille AS backdrop_rarity,
+            gs.id AS symbol_id, gs.name AS symbol_name, gs.icon_url AS symbol_icon, gs.rarity_permille AS symbol_rarity
+        FROM listings l
+        JOIN collections c ON c.id = l.collection_id
+        LEFT JOIN gift_models gm ON gm.id = l.model_id
+        LEFT JOIN gift_backdrops gb ON gb.id = l.backdrop_id
+        LEFT JOIN gift_symbols gs ON gs.id = l.symbol_id
+        WHERE l.owner_tg_id = ? AND l.status = 'owned'
+        ORDER BY l.sold_at DESC, l.created_at DESC
+    `).all(tgId);
 }
 
 /** Как getListingById, но с названиями/картинками трейтов через JOIN (без ограничения
@@ -650,6 +701,10 @@ module.exports = {
     getListingWithDetails,
     setListingStatus,
     findListings,
+    transferListingToBuyer,
+    returnListingToOwnerStorage,
+    relistOwnedItem,
+    listOwnedItemsForUser,
     createTransaction,
     listTransactionsForUser,
     createOrder,
