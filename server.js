@@ -343,10 +343,10 @@ app.post('/api/inventory/add', requireAuth, (req, res) => {
 // барабане (не шанс всей комбинации!). Редкие символы дают больший
 // множитель, поэтому и выпадают реже.
 const SLOTS_SYMBOLS = [
-    { id: 'cherry', weight: 38, multiplier: 2 },
-    { id: 'lemon', weight: 38, multiplier: 2 },
-    { id: 'seven', weight: 17, multiplier: 2.5 },
-    { id: 'diamond', weight: 7, multiplier: 3 },
+    { id: 'cherry', weight: 38, multiplier: 3 },
+    { id: 'lemon', weight: 38, multiplier: 3 },
+    { id: 'seven', weight: 17, multiplier: 5 },
+    { id: 'diamond', weight: 7, multiplier: 7 },
 ];
 const SLOTS_TOTAL_WEIGHT = SLOTS_SYMBOLS.reduce((sum, s) => sum + s.weight, 0);
 const SLOTS_MIN_BET = 0.3;
