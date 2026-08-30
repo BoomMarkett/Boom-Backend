@@ -415,10 +415,10 @@ app.post('/api/games/slots/spin', requireAuth, (req, res) => {
 // банк был бы гарантированно в минусе на длинной дистанции, поэтому он
 // занимает больше половины колеса.
 const ROULETTE_SEGMENTS = [
-    { id: 'miss', multiplier: 0, weight: 650 },
-    { id: 'x15', multiplier: 1.5, weight: 200 },
-    { id: 'x2', multiplier: 2, weight: 90 },
-    { id: 'x3', multiplier: 3, weight: 40 },
+    { id: 'miss', multiplier: 0, weight: 600 },
+    { id: 'x15', multiplier: 1.5, weight: 230 },
+    { id: 'x2', multiplier: 2, weight: 100 },
+    { id: 'x3', multiplier: 3, weight: 50 },
     { id: 'x5', multiplier: 5, weight: 15 },
     { id: 'x10', multiplier: 10, weight: 5 },
 ];
