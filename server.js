@@ -27,6 +27,15 @@ const {
     listOrderHistoryForUser,
     findMatchingOrder,
     listOffersForUser,
+    searchUsersByUsername,
+    listOwnedItemsForTgId,
+    createTrade,
+    getTradeWithItems,
+    listIncomingTradesForUser,
+    listMyTradesForUser,
+    acceptTrade,
+    declineTrade,
+    cancelTrade,
 } = require('./database');
 
 const app = express();
@@ -570,6 +579,125 @@ app.post('/api/listings/:id/accept-offer', requireAuth, (req, res) => {
     createTransaction({ tg_id: req.tgId, type: 'sell', amount: sellerPayout, ...giftSnapshot });
 
     res.json({ ok: true, listing: soldListing, balance: seller.balance });
+});
+
+// =====================================================================
+// ТРЕЙД (P2P-обмен подарками между пользователями)
+// =====================================================================
+
+// === Поиск пользователя по началу username — для выбора получателя обмена ===
+app.get('/api/users/search', requireAuth, (req, res) => {
+    const q = String(req.query.q || '');
+    if (!q.trim()) {
+        return res.json({ ok: true, users: [] });
+    }
+    const users = searchUsersByUsername(q, req.tgId);
+    res.json({ ok: true, users });
+});
+
+// === Предметы конкретного пользователя (публично видимая часть "Хранилища") —
+// нужно, чтобы показать инициатору, что можно попросить у получателя ===
+app.get('/api/users/:tgId/inventory', requireAuth, (req, res) => {
+    const targetTgId = parseInt(req.params.tgId, 10);
+    if (!targetTgId || targetTgId === req.tgId) {
+        return res.status(400).json({ ok: false, error: 'Некорректный пользователь' });
+    }
+    const target = getUserByTgId(targetTgId);
+    if (!target) {
+        return res.status(404).json({ ok: false, error: 'Пользователь не найден' });
+    }
+    res.json({ ok: true, items: listOwnedItemsForTgId(targetTgId) });
+});
+
+// === Создать предложение обмена ===
+app.post('/api/trades', requireAuth, (req, res) => {
+    const recipientTgId = parseInt(req.body.recipientTgId, 10);
+    const myItemIds = Array.isArray(req.body.myItemIds) ? req.body.myItemIds.map(id => parseInt(id, 10)) : [];
+    const theirItemIds = Array.isArray(req.body.theirItemIds) ? req.body.theirItemIds.map(id => parseInt(id, 10)) : [];
+
+    if (!recipientTgId || recipientTgId === req.tgId) {
+        return res.status(400).json({ ok: false, error: 'Укажите корректного получателя' });
+    }
+    if (myItemIds.length === 0 || theirItemIds.length === 0) {
+        return res.status(400).json({ ok: false, error: 'Выберите хотя бы один предмет с каждой стороны' });
+    }
+
+    const recipient = getUserByTgId(recipientTgId);
+    if (!recipient) {
+        return res.status(404).json({ ok: false, error: 'Получатель не найден' });
+    }
+
+    // Перепроверяем владение каждым предметом на сервере — не доверяем id с фронта вслепую.
+    for (const id of myItemIds) {
+        const listing = getListingById(id);
+        if (!listing || listing.owner_tg_id !== req.tgId || listing.status !== 'owned') {
+            return res.status(400).json({ ok: false, error: 'Один из ваших предметов недоступен для обмена' });
+        }
+    }
+    for (const id of theirItemIds) {
+        const listing = getListingById(id);
+        if (!listing || listing.owner_tg_id !== recipientTgId || listing.status !== 'owned') {
+            return res.status(400).json({ ok: false, error: 'Один из предметов получателя больше недоступен' });
+        }
+    }
+
+    const trade = createTrade({
+        initiator_tg_id: req.tgId,
+        recipient_tg_id: recipientTgId,
+        initiatorListingIds: myItemIds,
+        recipientListingIds: theirItemIds,
+    });
+
+    res.json({ ok: true, trade });
+});
+
+// === Входящие предложения обмена (я — получатель, жду решения) ===
+app.get('/api/trades/incoming', requireAuth, (req, res) => {
+    res.json({ ok: true, trades: listIncomingTradesForUser(req.tgId) });
+});
+
+// === Все мои трейды — и исходящие, и входящие, в любом статусе ===
+app.get('/api/trades/mine', requireAuth, (req, res) => {
+    res.json({ ok: true, trades: listMyTradesForUser(req.tgId) });
+});
+
+// === Детали одного трейда ===
+app.get('/api/trades/:id', requireAuth, (req, res) => {
+    const trade = getTradeWithItems(parseInt(req.params.id, 10));
+    if (!trade) {
+        return res.status(404).json({ ok: false, error: 'Трейд не найден' });
+    }
+    if (trade.initiator_tg_id !== req.tgId && trade.recipient_tg_id !== req.tgId) {
+        return res.status(403).json({ ok: false, error: 'Это не ваш трейд' });
+    }
+    res.json({ ok: true, trade });
+});
+
+// === Принять трейд (только получатель) ===
+app.post('/api/trades/:id/accept', requireAuth, (req, res) => {
+    const result = acceptTrade(parseInt(req.params.id, 10), req.tgId);
+    if (!result.ok) {
+        return res.status(400).json({ ok: false, error: result.error });
+    }
+    res.json({ ok: true, trade: result.trade });
+});
+
+// === Отклонить трейд (только получатель) ===
+app.post('/api/trades/:id/decline', requireAuth, (req, res) => {
+    const result = declineTrade(parseInt(req.params.id, 10), req.tgId);
+    if (!result.ok) {
+        return res.status(400).json({ ok: false, error: result.error });
+    }
+    res.json({ ok: true, trade: result.trade });
+});
+
+// === Отменить свой исходящий трейд, пока он ещё не принят (только инициатор) ===
+app.delete('/api/trades/:id', requireAuth, (req, res) => {
+    const result = cancelTrade(parseInt(req.params.id, 10), req.tgId);
+    if (!result.ok) {
+        return res.status(400).json({ ok: false, error: result.error });
+    }
+    res.json({ ok: true, trade: result.trade });
 });
 
 app.get('/', (req, res) => {

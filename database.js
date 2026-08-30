@@ -137,6 +137,32 @@ db.exec(`
     CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
     CREATE INDEX IF NOT EXISTS idx_orders_buyer ON orders(buyer_tg_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_orders_match ON orders(collection_id, model_id, backdrop_id, symbol_id, status);
+
+    -- Трейд (P2P-обмен подарками между двумя пользователями). Одна запись —
+    -- одно предложение обмена: initiator предлагает свои предметы (и/или
+    -- запрашивает предметы recipient'а), recipient соглашается или отклоняет.
+    CREATE TABLE IF NOT EXISTS trades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        initiator_tg_id INTEGER NOT NULL REFERENCES users(tg_id),
+        recipient_tg_id INTEGER NOT NULL REFERENCES users(tg_id),
+        status TEXT NOT NULL DEFAULT 'pending', -- pending | accepted | declined | cancelled | failed
+        fail_reason TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        resolved_at TEXT
+    );
+
+    -- Конкретные предметы (листинги в статусе 'owned'), участвующие в трейде —
+    -- side указывает, чья это сторона: 'initiator' или 'recipient'.
+    CREATE TABLE IF NOT EXISTS trade_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trade_id INTEGER NOT NULL REFERENCES trades(id) ON DELETE CASCADE,
+        listing_id INTEGER NOT NULL REFERENCES listings(id),
+        side TEXT NOT NULL -- initiator | recipient
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_trades_recipient ON trades(recipient_tg_id, status);
+    CREATE INDEX IF NOT EXISTS idx_trades_initiator ON trades(initiator_tg_id, status);
+    CREATE INDEX IF NOT EXISTS idx_trade_items_trade ON trade_items(trade_id);
 `);
 
 // === Миграция: добавляем новые колонки в уже существующую базу ===
@@ -683,6 +709,191 @@ function listOffersForUser(tgId) {
     `).all({ tg_id: tgId });
 }
 
+// =====================================================================
+// ТРЕЙД (P2P-обмен подарками)
+// =====================================================================
+
+/** Поиск пользователей по началу username (без учёта регистра) — для выбора
+ * получателя обмена. Исключает самого себя, лимит 10 результатов. */
+function searchUsersByUsername(query, excludeTgId) {
+    const q = String(query || '').trim().replace(/^@/, '');
+    if (!q) return [];
+    return db.prepare(`
+        SELECT tg_id, username, first_name, last_name, photo_url
+        FROM users
+        WHERE username IS NOT NULL
+          AND LOWER(username) LIKE LOWER(?) || '%'
+          AND tg_id != ?
+        ORDER BY username ASC
+        LIMIT 10
+    `).all(q, excludeTgId);
+}
+
+/** Предметы конкретного пользователя (по трейтам, так же как listOwnedItemsForUser) —
+ * используется, чтобы показать инициатору "предметы получателя" при создании трейда.
+ * Данные не приватные — та же информация, что видна на публичных лотах маркета. */
+function listOwnedItemsForTgId(tgId) {
+    return listOwnedItemsForUser(tgId);
+}
+
+const tradeStatements = {
+    insertTrade: db.prepare(`
+        INSERT INTO trades (initiator_tg_id, recipient_tg_id)
+        VALUES (@initiator_tg_id, @recipient_tg_id)
+    `),
+    insertItem: db.prepare(`INSERT INTO trade_items (trade_id, listing_id, side) VALUES (?, ?, ?)`),
+    findById: db.prepare('SELECT * FROM trades WHERE id = ?'),
+    itemsForTrade: db.prepare('SELECT * FROM trade_items WHERE trade_id = ?'),
+    setStatus: db.prepare(`
+        UPDATE trades
+        SET status = ?, fail_reason = ?, resolved_at = datetime('now')
+        WHERE id = ?
+    `),
+};
+
+/** Создаёт трейд + строки предметов одной транзакцией. Владение предметами
+ * должна была уже проверить вызывающая сторона (маршрут в server.js) —
+ * здесь только запись. */
+function createTrade({ initiator_tg_id, recipient_tg_id, initiatorListingIds, recipientListingIds }) {
+    const run = db.transaction(() => {
+        const info = tradeStatements.insertTrade.run({ initiator_tg_id, recipient_tg_id });
+        const tradeId = info.lastInsertRowid;
+        for (const listingId of initiatorListingIds) {
+            tradeStatements.insertItem.run(tradeId, listingId, 'initiator');
+        }
+        for (const listingId of recipientListingIds) {
+            tradeStatements.insertItem.run(tradeId, listingId, 'recipient');
+        }
+        return tradeId;
+    });
+    const tradeId = run();
+    return getTradeWithItems(tradeId);
+}
+
+function getTradeById(id) {
+    return tradeStatements.findById.get(id);
+}
+
+/** Трейд + предметы обеих сторон с подробностями (картинка/название/трейты)
+ * + краткие профили инициатора и получателя — всё, что нужно карточке на фронте. */
+function getTradeWithItems(id) {
+    const trade = getTradeById(id);
+    if (!trade) return null;
+
+    const rawItems = tradeStatements.itemsForTrade.all(id);
+    const items = rawItems.map(item => ({
+        side: item.side,
+        ...getListingWithDetails(item.listing_id),
+    }));
+
+    return {
+        ...trade,
+        initiator: getUserByTgId(trade.initiator_tg_id),
+        recipient: getUserByTgId(trade.recipient_tg_id),
+        initiatorItems: items.filter(i => i.side === 'initiator'),
+        recipientItems: items.filter(i => i.side === 'recipient'),
+    };
+}
+
+/** Входящие предложения обмена, ожидающие решения пользователя (он — получатель). */
+function listIncomingTradesForUser(tgId) {
+    const rows = db.prepare(`
+        SELECT id FROM trades WHERE recipient_tg_id = ? AND status = 'pending' ORDER BY created_at DESC
+    `).all(tgId);
+    return rows.map(r => getTradeWithItems(r.id));
+}
+
+/** Все трейды пользователя (как инициатора, так и получателя) — для вкладки
+ * "Мои обмены": и ожидающие исходящие, и уже завершённые с обеих сторон. */
+function listMyTradesForUser(tgId) {
+    const rows = db.prepare(`
+        SELECT id FROM trades
+        WHERE initiator_tg_id = ? OR recipient_tg_id = ?
+        ORDER BY created_at DESC
+    `).all(tgId, tgId);
+    return rows.map(r => getTradeWithItems(r.id));
+}
+
+/** Проверяет, что каждый предмет по-прежнему принадлежит заявленной стороне
+ * и лежит в "Хранилище" (status='owned') — перепроверка на случай, если
+ * предмет успели продать/выставить на продажу за время ожидания ответа. */
+function verifyTradeItemsStillValid(trade) {
+    for (const item of trade.initiatorItems) {
+        if (item.owner_tg_id !== trade.initiator_tg_id || item.status !== 'owned') return false;
+    }
+    for (const item of trade.recipientItems) {
+        if (item.owner_tg_id !== trade.recipient_tg_id || item.status !== 'owned') return false;
+    }
+    return true;
+}
+
+/** Принять трейд: recipient подтверждает обмен. Меняет владельца всех
+ * предметов местами в одной транзакции. Возвращает { ok, trade, error }. */
+function acceptTrade(tradeId, actingTgId) {
+    const trade = getTradeWithItems(tradeId);
+    if (!trade) return { ok: false, error: 'Трейд не найден' };
+    if (trade.recipient_tg_id !== actingTgId) return { ok: false, error: 'Это не ваше предложение обмена' };
+    if (trade.status !== 'pending') return { ok: false, error: 'Этот трейд уже закрыт' };
+
+    if (!verifyTradeItemsStillValid(trade)) {
+        tradeStatements.setStatus.run('failed', 'Один из предметов больше недоступен', tradeId);
+        return { ok: false, error: 'Один из предметов уже продан или недоступен — трейд отменён' };
+    }
+
+    db.transaction(() => {
+        for (const item of trade.initiatorItems) {
+            transferListingToBuyer(item.id, trade.recipient_tg_id);
+        }
+        for (const item of trade.recipientItems) {
+            transferListingToBuyer(item.id, trade.initiator_tg_id);
+        }
+        tradeStatements.setStatus.run('accepted', null, tradeId);
+
+        const logSide = (tgId, itemsGiven, itemsReceived) => {
+            itemsGiven.forEach(gift => createTransaction({
+                tg_id: tgId, type: 'trade_out', amount: 0, listing_id: gift.id,
+                collection_name: gift.collection_name, collection_image: gift.collection_image,
+                model_name: gift.model_name, model_image: gift.model_image,
+                backdrop_name: gift.backdrop_name, backdrop_color: gift.backdrop_color,
+                symbol_name: gift.symbol_name, symbol_icon: gift.symbol_icon,
+                gift_number: gift.gift_number,
+            }));
+            itemsReceived.forEach(gift => createTransaction({
+                tg_id: tgId, type: 'trade_in', amount: 0, listing_id: gift.id,
+                collection_name: gift.collection_name, collection_image: gift.collection_image,
+                model_name: gift.model_name, model_image: gift.model_image,
+                backdrop_name: gift.backdrop_name, backdrop_color: gift.backdrop_color,
+                symbol_name: gift.symbol_name, symbol_icon: gift.symbol_icon,
+                gift_number: gift.gift_number,
+            }));
+        };
+        logSide(trade.initiator_tg_id, trade.initiatorItems, trade.recipientItems);
+        logSide(trade.recipient_tg_id, trade.recipientItems, trade.initiatorItems);
+    })();
+
+    return { ok: true, trade: getTradeWithItems(tradeId) };
+}
+
+function declineTrade(tradeId, actingTgId) {
+    const trade = getTradeById(tradeId);
+    if (!trade) return { ok: false, error: 'Трейд не найден' };
+    if (trade.recipient_tg_id !== actingTgId) return { ok: false, error: 'Это не ваше предложение обмена' };
+    if (trade.status !== 'pending') return { ok: false, error: 'Этот трейд уже закрыт' };
+
+    tradeStatements.setStatus.run('declined', null, tradeId);
+    return { ok: true, trade: getTradeWithItems(tradeId) };
+}
+
+function cancelTrade(tradeId, actingTgId) {
+    const trade = getTradeById(tradeId);
+    if (!trade) return { ok: false, error: 'Трейд не найден' };
+    if (trade.initiator_tg_id !== actingTgId) return { ok: false, error: 'Это не ваш трейд' };
+    if (trade.status !== 'pending') return { ok: false, error: 'Этот трейд уже закрыт' };
+
+    tradeStatements.setStatus.run('cancelled', null, tradeId);
+    return { ok: true, trade: getTradeWithItems(tradeId) };
+}
+
 module.exports = {
     db,
     findOrCreateUser,
@@ -716,4 +927,14 @@ module.exports = {
     findMatchingOrder,
     findMatchingOrdersForListing,
     listOffersForUser,
+    searchUsersByUsername,
+    listOwnedItemsForTgId,
+    createTrade,
+    getTradeById,
+    getTradeWithItems,
+    listIncomingTradesForUser,
+    listMyTradesForUser,
+    acceptTrade,
+    declineTrade,
+    cancelTrade,
 };
