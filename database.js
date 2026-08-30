@@ -580,7 +580,7 @@ function findMatchingOrder(listing) {
 }
 
 /**
- * Возвращает ВСЕ активные ордера, подходящие под конкретный листинг (та же
+ * Возвращает ВСЕ активные ордера, которые подходят под конкретный листинг (та же
  * логика совпадения трейтов, что и при мгновенном матче на создание лота),
  * но БЕЗ фильтра по цене — продавцу нужно видеть все предложения на этот
  * трейт, в том числе ниже цены лота, чтобы самому решить, принимать ли.
@@ -600,6 +600,36 @@ function findMatchingOrdersForListing(listing) {
         backdrop_id: listing.backdrop_id,
         symbol_id: listing.symbol_id,
     });
+}
+
+/**
+ * Сводный список предложений (подходящих активных ордеров) по ВСЕМ активным
+ * лотам пользователя разом — используется вкладкой "Ордеры → Предложения",
+ * чтобы продавец видел все входящие офферы в одном месте, без похода в
+ * карточку каждого отдельного лота.
+ */
+function listOffersForUser(tgId) {
+    return db.prepare(`
+        SELECT
+            o.id AS order_id, o.max_price, o.created_at AS offer_created_at,
+            l.id AS listing_id, l.price AS listing_price, l.gift_number,
+            c.name AS collection_name, c.image_url AS collection_image,
+            gm.name AS model_name, gm.image_url AS model_icon,
+            gb.name AS backdrop_name, gb.color_hex AS backdrop_color,
+            gs.name AS symbol_name, gs.icon_url AS symbol_icon
+        FROM listings l
+        JOIN collections c ON c.id = l.collection_id
+        LEFT JOIN gift_models gm ON gm.id = l.model_id
+        LEFT JOIN gift_backdrops gb ON gb.id = l.backdrop_id
+        LEFT JOIN gift_symbols gs ON gs.id = l.symbol_id
+        JOIN orders o ON o.status = 'active'
+            AND o.collection_id = l.collection_id
+            AND (o.model_id IS NULL OR o.model_id = l.model_id)
+            AND (o.backdrop_id IS NULL OR o.backdrop_id = l.backdrop_id)
+            AND (o.symbol_id IS NULL OR o.symbol_id = l.symbol_id)
+        WHERE l.status = 'active' AND l.owner_tg_id = @tg_id
+        ORDER BY o.max_price DESC, o.created_at ASC
+    `).all({ tg_id: tgId });
 }
 
 module.exports = {
@@ -630,4 +660,5 @@ module.exports = {
     listOrderHistoryForUser,
     findMatchingOrder,
     findMatchingOrdersForListing,
+    listOffersForUser,
 };

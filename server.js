@@ -23,7 +23,7 @@ const {
     listActiveOrdersForUser,
     listOrderHistoryForUser,
     findMatchingOrder,
-    findMatchingOrdersForListing,
+    listOffersForUser,
 } = require('./database');
 
 const app = express();
@@ -430,19 +430,10 @@ app.delete('/api/listings/:id', requireAuth, (req, res) => {
     res.json({ ok: true, listing: updated });
 });
 
-// === Предложения (активные ордера на покупку), подходящие под конкретный лот —
-// видит только владелец, чтобы решить, продать ли дешевле рыночной цены ===
-app.get('/api/listings/:id/offers', requireAuth, (req, res) => {
-    const listing = getListingById(parseInt(req.params.id, 10));
-
-    if (!listing) {
-        return res.status(404).json({ ok: false, error: 'Листинг не найден' });
-    }
-    if (listing.owner_tg_id !== req.tgId) {
-        return res.status(403).json({ ok: false, error: 'Это не ваш листинг' });
-    }
-
-    const offers = findMatchingOrdersForListing(listing);
+// === Предложения (активные ордера на покупку), подходящие под лоты текущего
+// пользователя — сводно по всем его активным лотам, для вкладки "Ордеры → Предложения" ===
+app.get('/api/my-offers', requireAuth, (req, res) => {
+    const offers = listOffersForUser(req.tgId);
     res.json({ ok: true, offers });
 });
 
