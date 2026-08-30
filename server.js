@@ -474,6 +474,198 @@ app.post('/api/games/roulette/spin', requireAuth, (req, res) => {
     });
 });
 
+// =====================================================================
+// ИГРА "БОМБЕР" (мины) — поле 7x7, игрок сам выбирает количество бомб
+// =====================================================================
+//
+// Правила:
+//   - Поле состоит из 49 ячеек (7x7). Перед стартом игрок выбирает
+//     количество бомб: 4, 6, 8 или 10 — и делает ставку.
+//   - Бомбы расставляются случайно и хранятся ТОЛЬКО на сервере — клиент
+//     их не знает, пока не откроет ячейку или не проиграет.
+//   - Игрок открывает ячейки по одной. Каждая безопасная ячейка увеличивает
+//     множитель выигрыша — чем больше бомб на поле и чем больше ячеек
+//     открыто, тем выше множитель (и риск).
+//   - В любой момент после первой открытой ячейки можно забрать выигрыш
+//     (Cashout) — ставка × текущий множитель зачисляется на баланс.
+//   - Если открыта ячейка с бомбой — раунд проигран, ставка сгорает,
+//     все бомбы показываются.
+//   - Если открыты ВСЕ безопасные ячейки (без единого подрыва) — выигрыш
+//     засчитывается автоматически по максимальному множителю.
+//
+// Множитель считается по честной комбинаторной формуле (гипергеометрическое
+// распределение — вероятность вытащить k безопасных ячеек подряд без бомбы
+// из колоды 49 ячеек с M бомбами), из неё вычитается комиссия площадки.
+const BOMBER_GRID_SIZE = 49; // поле 7x7
+const BOMBER_ALLOWED_BOMBS = [4, 6, 8, 10];
+const BOMBER_MIN_BET = 0.3;
+const BOMBER_MAX_BET = 1000;
+const BOMBER_HOUSE_EDGE = 0.05; // 5% комиссии площадки, зашита в множитель
+
+// Активные раунды хранятся в памяти процесса, а не в БД — раунд живёт
+// от старта до кэшаута/проигрыша, персистентность между рестартами
+// сервера для него не нужна (как и для слотов/рулетки, здесь всё решается
+// одним "заходом"). Один активный раунд на пользователя одновременно.
+const bomberActiveGames = new Map(); // tgId -> { bet, bombs, bombSet, revealed:Set, startedAt }
+
+function bomberFairMultiplier(bombs, picks) {
+    // ∏ (N-i)/(N-bombs-i) для i=0..picks-1 — честный (без учёта комиссии)
+    // множитель за то, что все picks открытых ячеек оказались безопасными.
+    let mult = 1;
+    for (let i = 0; i < picks; i++) {
+        mult *= (BOMBER_GRID_SIZE - i) / (BOMBER_GRID_SIZE - bombs - i);
+    }
+    return mult;
+}
+
+function bomberMultiplier(bombs, picks) {
+    if (picks <= 0) return 1;
+    return bomberFairMultiplier(bombs, picks) * (1 - BOMBER_HOUSE_EDGE);
+}
+
+function bomberPublicState(game) {
+    const safeCellsTotal = BOMBER_GRID_SIZE - game.bombs;
+    const picks = game.revealed.size;
+    const currentMultiplier = Math.round(bomberMultiplier(game.bombs, picks) * 100) / 100;
+    const nextMultiplier = picks < safeCellsTotal
+        ? Math.round(bomberMultiplier(game.bombs, picks + 1) * 100) / 100
+        : null;
+    return {
+        bet: game.bet,
+        bombs: game.bombs,
+        gridSize: BOMBER_GRID_SIZE,
+        revealed: [...game.revealed],
+        picks,
+        safeCellsTotal,
+        currentMultiplier,
+        nextMultiplier,
+        potentialWin: Math.round(game.bet * currentMultiplier * 100) / 100,
+    };
+}
+
+// === Начать раунд: списываем ставку сразу (резерв), генерируем бомбы ===
+app.post('/api/games/bomber/start', requireAuth, (req, res) => {
+    const bet = parseFloat(req.body.bet);
+    const bombs = parseInt(req.body.bombs, 10);
+
+    if (!isValidAmount(bet, BOMBER_MIN_BET, BOMBER_MAX_BET)) {
+        return res.status(400).json({
+            ok: false,
+            error: `Ставка должна быть от ${BOMBER_MIN_BET} до ${BOMBER_MAX_BET} TON, максимум с одним знаком после запятой`,
+        });
+    }
+    if (!BOMBER_ALLOWED_BOMBS.includes(bombs)) {
+        return res.status(400).json({ ok: false, error: 'Количество бомб должно быть 4, 6, 8 или 10' });
+    }
+    if (bomberActiveGames.has(req.tgId)) {
+        return res.status(400).json({ ok: false, error: 'У вас уже есть активный раунд — завершите его (откройте ячейку или заберите выигрыш)' });
+    }
+
+    let user;
+    try {
+        user = adjustBalance(req.tgId, -bet);
+    } catch (e) {
+        return res.status(400).json({ ok: false, error: 'Недостаточно средств на балансе' });
+    }
+
+    // Расставляем бомбы случайно по 49 ячейкам (индексы 0..48).
+    const positions = Array.from({ length: BOMBER_GRID_SIZE }, (_, i) => i);
+    for (let i = positions.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [positions[i], positions[j]] = [positions[j], positions[i]];
+    }
+    const bombSet = new Set(positions.slice(0, bombs));
+
+    const game = { bet, bombs, bombSet, revealed: new Set(), startedAt: Date.now() };
+    bomberActiveGames.set(req.tgId, game);
+
+    res.json({ ok: true, balance: user.balance, game: bomberPublicState(game) });
+});
+
+// === Открыть ячейку ===
+app.post('/api/games/bomber/reveal', requireAuth, (req, res) => {
+    const cell = parseInt(req.body.cell, 10);
+    const game = bomberActiveGames.get(req.tgId);
+
+    if (!game) {
+        return res.status(400).json({ ok: false, error: 'Нет активного раунда — начните новую игру' });
+    }
+    if (!Number.isInteger(cell) || cell < 0 || cell >= BOMBER_GRID_SIZE) {
+        return res.status(400).json({ ok: false, error: 'Некорректная ячейка' });
+    }
+    if (game.revealed.has(cell)) {
+        return res.status(400).json({ ok: false, error: 'Эта ячейка уже открыта' });
+    }
+
+    if (game.bombSet.has(cell)) {
+        // Подрыв — раунд проигран, ставка не возвращается (она уже списана при старте).
+        bomberActiveGames.delete(req.tgId);
+        createTransaction({ tg_id: req.tgId, type: 'game_bomber', amount: -game.bet });
+        return res.json({
+            ok: true,
+            win: false,
+            hitCell: cell,
+            bombs: [...game.bombSet],
+            betAmount: game.bet,
+            winAmount: 0,
+        });
+    }
+
+    game.revealed.add(cell);
+    const safeCellsTotal = BOMBER_GRID_SIZE - game.bombs;
+
+    if (game.revealed.size >= safeCellsTotal) {
+        // Открыты все безопасные ячейки — автоматический кэшаут по максимальному множителю.
+        const multiplier = Math.round(bomberMultiplier(game.bombs, game.revealed.size) * 100) / 100;
+        const winAmount = Math.round(game.bet * multiplier * 100) / 100;
+        bomberActiveGames.delete(req.tgId);
+        const user = adjustBalance(req.tgId, winAmount);
+        createTransaction({ tg_id: req.tgId, type: 'game_bomber', amount: winAmount - game.bet });
+        return res.json({
+            ok: true,
+            win: true,
+            cleared: true,
+            cell,
+            multiplier,
+            betAmount: game.bet,
+            winAmount,
+            balance: user.balance,
+            bombs: [...game.bombSet],
+        });
+    }
+
+    res.json({ ok: true, win: null, cell, game: bomberPublicState(game) });
+});
+
+// === Забрать выигрыш досрочно ===
+app.post('/api/games/bomber/cashout', requireAuth, (req, res) => {
+    const game = bomberActiveGames.get(req.tgId);
+    if (!game) {
+        return res.status(400).json({ ok: false, error: 'Нет активного раунда' });
+    }
+    if (game.revealed.size === 0) {
+        return res.status(400).json({ ok: false, error: 'Откройте хотя бы одну ячейку перед выводом' });
+    }
+
+    const multiplier = Math.round(bomberMultiplier(game.bombs, game.revealed.size) * 100) / 100;
+    const winAmount = Math.round(game.bet * multiplier * 100) / 100;
+    bomberActiveGames.delete(req.tgId);
+
+    const user = adjustBalance(req.tgId, winAmount);
+    createTransaction({ tg_id: req.tgId, type: 'game_bomber', amount: winAmount - game.bet });
+
+    res.json({ ok: true, win: true, multiplier, betAmount: game.bet, winAmount, balance: user.balance });
+});
+
+// === Текущее состояние раунда (на случай, если пользователь обновил страницу) ===
+app.get('/api/games/bomber/state', requireAuth, (req, res) => {
+    const game = bomberActiveGames.get(req.tgId);
+    if (!game) {
+        return res.json({ ok: true, game: null });
+    }
+    res.json({ ok: true, game: bomberPublicState(game) });
+});
+
 // === Создать ордер на покупку (сумма сразу резервируется на балансе) ===
 app.post('/api/orders', requireAuth, (req, res) => {
     const { collectionId, modelId, backdropId, symbolId, maxPrice } = req.body;
