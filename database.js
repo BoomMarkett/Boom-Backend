@@ -110,6 +110,28 @@ db.exec(`
     );
 
     CREATE INDEX IF NOT EXISTS idx_transactions_tg_id ON transactions(tg_id, created_at DESC);
+
+    -- Ордера на покупку: пользователь резервирует сумму (max_price) и указывает,
+    -- какой подарок хочет купить — коллекция обязательна, модель/фон/символ
+    -- необязательны (NULL = "любой"). Как только кто-то выставляет подходящий
+    -- листинг (см. findMatchingOrder), сделка исполняется мгновенно.
+    CREATE TABLE IF NOT EXISTS orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        buyer_tg_id INTEGER NOT NULL REFERENCES users(tg_id),
+        collection_id INTEGER NOT NULL REFERENCES collections(id),
+        model_id INTEGER REFERENCES gift_models(id),
+        backdrop_id INTEGER REFERENCES gift_backdrops(id),
+        symbol_id INTEGER REFERENCES gift_symbols(id),
+        max_price REAL NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active', -- active | cancelled | filled
+        matched_listing_id INTEGER REFERENCES listings(id),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        closed_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+    CREATE INDEX IF NOT EXISTS idx_orders_buyer ON orders(buyer_tg_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_orders_match ON orders(collection_id, model_id, backdrop_id, symbol_id, status);
 `);
 
 // === Миграция: добавляем новые колонки в уже существующую базу ===
@@ -460,6 +482,103 @@ function listTransactionsForUser(tgId) {
     return transactionStatements.listByUser.all(tgId);
 }
 
+// === Подготовленные запросы: ордера на покупку ===
+const orderStatements = {
+    insert: db.prepare(`
+        INSERT INTO orders (buyer_tg_id, collection_id, model_id, backdrop_id, symbol_id, max_price)
+        VALUES (@buyer_tg_id, @collection_id, @model_id, @backdrop_id, @symbol_id, @max_price)
+    `),
+    findById: db.prepare('SELECT * FROM orders WHERE id = ?'),
+    setStatus: db.prepare(`
+        UPDATE orders
+        SET status = ?,
+            matched_listing_id = COALESCE(?, matched_listing_id),
+            closed_at = CASE WHEN ? != 'active' THEN datetime('now') ELSE closed_at END
+        WHERE id = ?
+    `),
+};
+
+function createOrder(data) {
+    const info = orderStatements.insert.run({
+        buyer_tg_id: data.buyer_tg_id,
+        collection_id: data.collection_id,
+        model_id: data.model_id ?? null,
+        backdrop_id: data.backdrop_id ?? null,
+        symbol_id: data.symbol_id ?? null,
+        max_price: data.max_price,
+    });
+    return orderStatements.findById.get(info.lastInsertRowid);
+}
+
+function getOrderById(id) {
+    return orderStatements.findById.get(id);
+}
+
+function setOrderStatus(id, status, matchedListingId = null) {
+    orderStatements.setStatus.run(status, matchedListingId, status, id);
+    return getOrderById(id);
+}
+
+// Общий SELECT: критерии ордера (коллекция/модель/фон/символ, через JOIN на
+// каталог трейтов — так же, как для листингов) + данные исполненного лота,
+// если ордер уже сматчился (matched_listing_id).
+function ordersDetailQuery() {
+    return `
+        SELECT
+            o.id, o.buyer_tg_id, o.max_price, o.status, o.created_at, o.closed_at, o.matched_listing_id,
+            c.id AS collection_id, c.name AS collection_name, c.image_url AS collection_image,
+            gm.name AS model_name, gm.image_url AS model_image,
+            gb.name AS backdrop_name, gb.color_hex AS backdrop_color,
+            gs.name AS symbol_name, gs.icon_url AS symbol_icon,
+            ml.price AS matched_price, ml.gift_number AS matched_gift_number
+        FROM orders o
+        JOIN collections c ON c.id = o.collection_id
+        LEFT JOIN gift_models gm ON gm.id = o.model_id
+        LEFT JOIN gift_backdrops gb ON gb.id = o.backdrop_id
+        LEFT JOIN gift_symbols gs ON gs.id = o.symbol_id
+        LEFT JOIN listings ml ON ml.id = o.matched_listing_id
+    `;
+}
+
+function getOrderWithDetails(id) {
+    return db.prepare(`${ordersDetailQuery()} WHERE o.id = ?`).get(id);
+}
+
+function listActiveOrdersForUser(tgId) {
+    return db.prepare(`${ordersDetailQuery()} WHERE o.buyer_tg_id = ? AND o.status = 'active' ORDER BY o.created_at DESC`).all(tgId);
+}
+
+function listOrderHistoryForUser(tgId) {
+    return db.prepare(`${ordersDetailQuery()} WHERE o.buyer_tg_id = ? AND o.status != 'active' ORDER BY o.created_at DESC`).all(tgId);
+}
+
+/**
+ * Ищет лучший активный ордер под свежесозданный листинг: коллекция обязана
+ * совпасть, модель/фон/символ ордера — либо совпадают с листингом, либо не
+ * заданы в ордере (NULL = "любой"), а цена ордера должна покрывать цену лота.
+ * При нескольких подходящих берём тот, что предлагает больше денег, а при
+ * равной цене — тот, что ждёт дольше.
+ */
+function findMatchingOrder(listing) {
+    return db.prepare(`
+        SELECT * FROM orders
+        WHERE status = 'active'
+          AND collection_id = @collection_id
+          AND (model_id IS NULL OR model_id = @model_id)
+          AND (backdrop_id IS NULL OR backdrop_id = @backdrop_id)
+          AND (symbol_id IS NULL OR symbol_id = @symbol_id)
+          AND max_price >= @price
+        ORDER BY max_price DESC, created_at ASC
+        LIMIT 1
+    `).get({
+        collection_id: listing.collection_id,
+        model_id: listing.model_id,
+        backdrop_id: listing.backdrop_id,
+        symbol_id: listing.symbol_id,
+        price: listing.price,
+    });
+}
+
 module.exports = {
     db,
     findOrCreateUser,
@@ -480,4 +599,11 @@ module.exports = {
     findListings,
     createTransaction,
     listTransactionsForUser,
+    createOrder,
+    getOrderById,
+    getOrderWithDetails,
+    setOrderStatus,
+    listActiveOrdersForUser,
+    listOrderHistoryForUser,
+    findMatchingOrder,
 };

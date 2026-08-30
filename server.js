@@ -16,6 +16,13 @@ const {
     setListingStatus,
     createTransaction,
     listTransactionsForUser,
+    createOrder,
+    getOrderById,
+    getOrderWithDetails,
+    setOrderStatus,
+    listActiveOrdersForUser,
+    listOrderHistoryForUser,
+    findMatchingOrder,
 } = require('./database');
 
 const app = express();
@@ -224,6 +231,10 @@ app.get('/api/listings', (req, res) => {
     res.json({ ok: true, listings });
 });
 
+// Комиссия маркетплейса — удерживается с продавца при продаже (из выручки),
+// покупатель платит ровно ту цену, что указана в лоте, без наценки.
+const MARKETPLACE_FEE_PERCENT = 1.5;
+
 // === Выставить лот на продажу ===
 app.post('/api/listings', requireAuth, (req, res) => {
     const { collectionId, modelId, backdropId, symbolId, giftNumber, nftAddress, price } = req.body;
@@ -244,12 +255,107 @@ app.post('/api/listings', requireAuth, (req, res) => {
         price: parsedPrice,
     });
 
+    // Проверяем, нет ли активного ордера, который ждёт именно такой подарок —
+    // если есть, сделка исполняется мгновенно, минуя обычный флоу "выставил → кто-то купил".
+    const matchedOrder = findMatchingOrder(listing);
+    if (matchedOrder && matchedOrder.buyer_tg_id !== req.tgId) {
+        // Деньги покупателя уже зарезервированы на его балансе при создании ордера —
+        // здесь просто зачисляем продавцу выручку за вычетом комиссии.
+        const sellerPayout = listing.price * (1 - MARKETPLACE_FEE_PERCENT / 100);
+        adjustBalance(req.tgId, sellerPayout);
+
+        // Если цена лота оказалась ниже максимума, который был готов заплатить
+        // покупатель, возвращаем ему разницу.
+        const refund = matchedOrder.max_price - listing.price;
+        if (refund > 1e-9) {
+            adjustBalance(matchedOrder.buyer_tg_id, refund);
+        }
+
+        const soldListing = setListingStatus(listing.id, 'sold');
+        setOrderStatus(matchedOrder.id, 'filled', listing.id);
+
+        const details = getListingWithDetails(listing.id);
+        const giftSnapshot = {
+            listing_id: listing.id,
+            collection_name: details.collection_name,
+            collection_image: details.collection_image,
+            model_name: details.model_name,
+            model_image: details.model_image,
+            backdrop_name: details.backdrop_name,
+            backdrop_color: details.backdrop_color,
+            symbol_name: details.symbol_name,
+            symbol_icon: details.symbol_icon,
+            gift_number: details.gift_number,
+        };
+        createTransaction({ tg_id: matchedOrder.buyer_tg_id, type: 'buy', amount: -listing.price, ...giftSnapshot });
+        createTransaction({ tg_id: req.tgId, type: 'sell', amount: sellerPayout, ...giftSnapshot });
+
+        return res.json({ ok: true, listing: soldListing, matchedOrder: true });
+    }
+
     res.json({ ok: true, listing });
 });
 
-// Комиссия маркетплейса — удерживается с продавца при продаже (из выручки),
-// покупатель платит ровно ту цену, что указана в лоте, без наценки.
-const MARKETPLACE_FEE_PERCENT = 1.5;
+// === Создать ордер на покупку (сумма сразу резервируется на балансе) ===
+app.post('/api/orders', requireAuth, (req, res) => {
+    const { collectionId, modelId, backdropId, symbolId, maxPrice } = req.body;
+    const parsedPrice = parseFloat(maxPrice);
+
+    if (!collectionId) {
+        return res.status(400).json({ ok: false, error: 'Выберите коллекцию' });
+    }
+    if (!isValidAmount(parsedPrice, 0.1, 100000)) {
+        return res.status(400).json({ ok: false, error: 'Цена должна быть от 0.1 до 100000, максимум с одним знаком после запятой' });
+    }
+
+    let buyer;
+    try {
+        buyer = adjustBalance(req.tgId, -parsedPrice);
+    } catch (e) {
+        return res.status(400).json({ ok: false, error: 'Недостаточно средств на балансе' });
+    }
+
+    const order = createOrder({
+        buyer_tg_id: req.tgId,
+        collection_id: collectionId,
+        model_id: modelId || null,
+        backdrop_id: backdropId || null,
+        symbol_id: symbolId || null,
+        max_price: parsedPrice,
+    });
+
+    res.json({ ok: true, order: getOrderWithDetails(order.id), balance: buyer.balance });
+});
+
+// === Активные ордера текущего пользователя ===
+app.get('/api/orders', requireAuth, (req, res) => {
+    res.json({ ok: true, orders: listActiveOrdersForUser(req.tgId) });
+});
+
+// === История ордеров текущего пользователя (исполненные/отменённые) ===
+app.get('/api/orders/history', requireAuth, (req, res) => {
+    res.json({ ok: true, orders: listOrderHistoryForUser(req.tgId) });
+});
+
+// === Отменить ордер (только владелец, только пока активен) — возвращает резерв на баланс ===
+app.delete('/api/orders/:id', requireAuth, (req, res) => {
+    const order = getOrderById(parseInt(req.params.id, 10));
+
+    if (!order) {
+        return res.status(404).json({ ok: false, error: 'Ордер не найден' });
+    }
+    if (order.buyer_tg_id !== req.tgId) {
+        return res.status(403).json({ ok: false, error: 'Это не ваш ордер' });
+    }
+    if (order.status !== 'active') {
+        return res.status(400).json({ ok: false, error: 'Ордер уже неактивен' });
+    }
+
+    const user = adjustBalance(req.tgId, order.max_price);
+    setOrderStatus(order.id, 'cancelled');
+
+    res.json({ ok: true, order: getOrderWithDetails(order.id), balance: user.balance });
+});
 
 // === Купить лот (только не собственный, только пока статус active) ===
 app.post('/api/listings/:id/buy', requireAuth, (req, res) => {
