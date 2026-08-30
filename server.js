@@ -311,6 +311,30 @@ app.post('/api/listings', requireAuth, (req, res) => {
     res.json({ ok: true, listing });
 });
 
+// === Добавить NFT сразу в личное "Хранилище" (без выставления на маркет,
+// цена не требуется — товар просто становится собственностью пользователя) ===
+app.post('/api/inventory/add', requireAuth, (req, res) => {
+    const { collectionId, modelId, backdropId, symbolId, giftNumber, nftAddress } = req.body;
+
+    if (!collectionId || !modelId || !backdropId || !symbolId || !giftNumber) {
+        return res.status(400).json({ ok: false, error: 'Заполнены не все обязательные поля' });
+    }
+
+    const listing = createListing({
+        owner_tg_id: req.tgId,
+        collection_id: collectionId,
+        model_id: modelId,
+        backdrop_id: backdropId,
+        symbol_id: symbolId,
+        gift_number: giftNumber,
+        nft_address: nftAddress || null,
+        price: 0,
+        status: 'owned',
+    });
+
+    res.json({ ok: true, listing });
+});
+
 // === Создать ордер на покупку (сумма сразу резервируется на балансе) ===
 app.post('/api/orders', requireAuth, (req, res) => {
     const { collectionId, modelId, backdropId, symbolId, maxPrice } = req.body;

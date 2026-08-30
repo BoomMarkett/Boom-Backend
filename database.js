@@ -365,8 +365,8 @@ function getAllFilters(collectionIds) {
 // === Подготовленные запросы: листинги (реальные лоты на продажу) ===
 const listingStatements = {
     insert: db.prepare(`
-        INSERT INTO listings (owner_tg_id, collection_id, model_id, backdrop_id, symbol_id, gift_number, nft_address, price)
-        VALUES (@owner_tg_id, @collection_id, @model_id, @backdrop_id, @symbol_id, @gift_number, @nft_address, @price)
+        INSERT INTO listings (owner_tg_id, collection_id, model_id, backdrop_id, symbol_id, gift_number, nft_address, price, status)
+        VALUES (@owner_tg_id, @collection_id, @model_id, @backdrop_id, @symbol_id, @gift_number, @nft_address, @price, @status)
     `),
     findById: db.prepare('SELECT * FROM listings WHERE id = ?'),
     setStatus: db.prepare(`UPDATE listings SET status = ?, sold_at = CASE WHEN ? = 'sold' THEN datetime('now') ELSE sold_at END WHERE id = ?`),
@@ -383,7 +383,10 @@ const listingStatements = {
 };
 
 function createListing(data) {
-    const info = listingStatements.insert.run(data);
+    // status необязателен — по умолчанию 'active' (как было раньше, для
+    // обычного выставления на продажу). Передав status: 'owned' можно
+    // сразу добавить подарок в личное "Хранилище", минуя маркет.
+    const info = listingStatements.insert.run({ status: 'active', ...data });
     return listingStatements.findById.get(info.lastInsertRowid);
 }
 
