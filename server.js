@@ -350,7 +350,7 @@ const SLOTS_SYMBOLS = [
 ];
 const SLOTS_TOTAL_WEIGHT = SLOTS_SYMBOLS.reduce((sum, s) => sum + s.weight, 0);
 const SLOTS_MIN_BET = 0.3;
-const SLOTS_MAX_BET = 10000;
+const SLOTS_MAX_BET = 1000;
 
 function spinReel() {
     let roll = Math.random() * SLOTS_TOTAL_WEIGHT;
@@ -399,6 +399,75 @@ app.post('/api/games/slots/spin', requireAuth, (req, res) => {
         reels,
         win: isWin,
         multiplier: isWin ? multiplier : null,
+        betAmount: bet,
+        winAmount,
+        balance: user.balance,
+    });
+});
+
+// =====================================================================
+// ИГРА "РУЛЕТКА"
+// =====================================================================
+
+// Секторы колеса и их "вес" (доля от общего круга). Чем выше множитель —
+// тем меньше его территория на колесе, поэтому и выпадает он реже.
+// Сектор 'miss' — проигрыш (x0): без него при множителях от x1.5 и выше
+// банк был бы гарантированно в минусе на длинной дистанции, поэтому он
+// занимает больше половины колеса.
+const ROULETTE_SEGMENTS = [
+    { id: 'miss', multiplier: 0, weight: 650 },
+    { id: 'x15', multiplier: 1.5, weight: 200 },
+    { id: 'x2', multiplier: 2, weight: 90 },
+    { id: 'x3', multiplier: 3, weight: 40 },
+    { id: 'x5', multiplier: 5, weight: 15 },
+    { id: 'x10', multiplier: 10, weight: 5 },
+];
+const ROULETTE_TOTAL_WEIGHT = ROULETTE_SEGMENTS.reduce((sum, s) => sum + s.weight, 0);
+const ROULETTE_MIN_BET = 0.3;
+const ROULETTE_MAX_BET = 1000;
+
+function spinRoulette() {
+    let roll = Math.random() * ROULETTE_TOTAL_WEIGHT;
+    for (const segment of ROULETTE_SEGMENTS) {
+        if (roll < segment.weight) return segment;
+        roll -= segment.weight;
+    }
+    return ROULETTE_SEGMENTS[ROULETTE_SEGMENTS.length - 1];
+}
+
+// === Крутануть рулетку: аналогично слотам — весь расчёт на сервере,
+// клиент только проигрывает анимацию по присланному результату ===
+app.post('/api/games/roulette/spin', requireAuth, (req, res) => {
+    const bet = parseFloat(req.body.bet);
+
+    if (!isValidAmount(bet, ROULETTE_MIN_BET, ROULETTE_MAX_BET)) {
+        return res.status(400).json({
+            ok: false,
+            error: `Ставка должна быть от ${ROULETTE_MIN_BET} до ${ROULETTE_MAX_BET} TON, максимум с одним знаком после запятой`,
+        });
+    }
+
+    const segment = spinRoulette();
+    const isWin = segment.multiplier > 0;
+    const winAmount = isWin ? Math.round(bet * segment.multiplier * 100) / 100 : 0;
+
+    // Одна операция с балансом: -ставка, +выигрыш (0, если проигрыш).
+    const netDelta = Math.round((winAmount - bet) * 100) / 100;
+
+    let user;
+    try {
+        user = adjustBalance(req.tgId, netDelta);
+    } catch (e) {
+        return res.status(400).json({ ok: false, error: 'Недостаточно средств на балансе' });
+    }
+
+    createTransaction({ tg_id: req.tgId, type: 'game_roulette', amount: netDelta });
+
+    res.json({
+        ok: true,
+        result: segment.id,
+        win: isWin,
+        multiplier: isWin ? segment.multiplier : null,
         betAmount: bet,
         winAmount,
         balance: user.balance,
