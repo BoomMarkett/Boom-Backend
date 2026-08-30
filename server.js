@@ -609,6 +609,10 @@ app.get('/api/users/:tgId/inventory', requireAuth, (req, res) => {
     res.json({ ok: true, items: listOwnedItemsForTgId(targetTgId) });
 });
 
+// Комиссия площадки за один трейд — списывается с инициатора при создании
+// (см. ниже) и возвращается ему, если трейд не завершится успехом.
+const TRADE_FEE_TON = 0.05;
+
 // === Создать предложение обмена ===
 app.post('/api/trades', requireAuth, (req, res) => {
     const recipientTgId = parseInt(req.body.recipientTgId, 10);
@@ -620,6 +624,19 @@ app.post('/api/trades', requireAuth, (req, res) => {
     }
     if (myItemIds.length === 0 || theirItemIds.length === 0) {
         return res.status(400).json({ ok: false, error: 'Выберите хотя бы один предмет с каждой стороны' });
+    }
+
+    // Доплата TON поверх обмена предметами — необязательная. tonPayer говорит,
+    // кто именно доплачивает: 'initiator' (я доплачиваю получателю) или
+    // 'recipient' (прошу доплату у получателя).
+    let tonAmount = 0;
+    let tonPayer = null;
+    if (req.body.tonAmount !== undefined && req.body.tonAmount !== null && req.body.tonAmount !== '') {
+        tonAmount = parseFloat(req.body.tonAmount);
+        tonPayer = req.body.tonPayer === 'recipient' ? 'recipient' : 'initiator';
+        if (!isValidAmount(tonAmount, 0.1, 100000)) {
+            return res.status(400).json({ ok: false, error: 'Доплата должна быть от 0.1 до 100000 TON, максимум с одним знаком после запятой' });
+        }
     }
 
     const recipient = getUserByTgId(recipientTgId);
@@ -641,14 +658,29 @@ app.post('/api/trades', requireAuth, (req, res) => {
         }
     }
 
+    // Резервируем у инициатора комиссию сразу — и его собственную доплату,
+    // если он тот, кто доплачивает (доплату получателя резервировать нельзя,
+    // он ещё не согласился — её спишем только при принятии трейда).
+    const initiatorReserve = TRADE_FEE_TON + (tonPayer === 'initiator' ? tonAmount : 0);
+    let initiator;
+    try {
+        initiator = adjustBalance(req.tgId, -initiatorReserve);
+    } catch (e) {
+        return res.status(400).json({ ok: false, error: 'Недостаточно средств на балансе для комиссии' + (tonPayer === 'initiator' ? ' и доплаты' : '') });
+    }
+    createTransaction({ tg_id: req.tgId, type: 'trade_fee', amount: -TRADE_FEE_TON });
+
     const trade = createTrade({
         initiator_tg_id: req.tgId,
         recipient_tg_id: recipientTgId,
         initiatorListingIds: myItemIds,
         recipientListingIds: theirItemIds,
+        ton_amount: tonAmount,
+        ton_payer: tonPayer,
+        fee_amount: TRADE_FEE_TON,
     });
 
-    res.json({ ok: true, trade });
+    res.json({ ok: true, trade, balance: initiator.balance });
 });
 
 // === Входящие предложения обмена (я — получатель, жду решения) ===
@@ -679,7 +711,8 @@ app.post('/api/trades/:id/accept', requireAuth, (req, res) => {
     if (!result.ok) {
         return res.status(400).json({ ok: false, error: result.error });
     }
-    res.json({ ok: true, trade: result.trade });
+    const user = getUserByTgId(req.tgId);
+    res.json({ ok: true, trade: result.trade, balance: user.balance });
 });
 
 // === Отклонить трейд (только получатель) ===
@@ -688,7 +721,8 @@ app.post('/api/trades/:id/decline', requireAuth, (req, res) => {
     if (!result.ok) {
         return res.status(400).json({ ok: false, error: result.error });
     }
-    res.json({ ok: true, trade: result.trade });
+    const user = getUserByTgId(req.tgId);
+    res.json({ ok: true, trade: result.trade, balance: user.balance });
 });
 
 // === Отменить свой исходящий трейд, пока он ещё не принят (только инициатор) ===
@@ -697,7 +731,8 @@ app.delete('/api/trades/:id', requireAuth, (req, res) => {
     if (!result.ok) {
         return res.status(400).json({ ok: false, error: result.error });
     }
-    res.json({ ok: true, trade: result.trade });
+    const user = getUserByTgId(req.tgId);
+    res.json({ ok: true, trade: result.trade, balance: user.balance });
 });
 
 app.get('/', (req, res) => {

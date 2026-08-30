@@ -147,6 +147,18 @@ db.exec(`
         recipient_tg_id INTEGER NOT NULL REFERENCES users(tg_id),
         status TEXT NOT NULL DEFAULT 'pending', -- pending | accepted | declined | cancelled | failed
         fail_reason TEXT,
+        -- Доплата TON поверх обмена предметами (необязательная):
+        -- ton_payer = 'initiator' — доплачивает инициатор получателю (в дополнение
+        --             к своим предметам, "с себя доплата на нфт другого человека");
+        -- ton_payer = 'recipient' — доплачивает получатель инициатору (инициатор
+        --             "просит доплату" за свои предметы);
+        -- ton_payer = NULL / ton_amount = 0 — доплаты нет.
+        ton_amount REAL NOT NULL DEFAULT 0,
+        ton_payer TEXT,                          -- 'initiator' | 'recipient' | NULL
+        -- Комиссия площадки за трейд — резервируется у инициатора СРАЗУ при
+        -- создании (см. createTrade), возвращается при cancelled/declined/failed,
+        -- списывается безвозвратно только если трейд успешно принят (accepted).
+        fee_amount REAL NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         resolved_at TEXT
     );
@@ -179,6 +191,9 @@ function addColumnIfMissing(table, column, definition) {
 
 addColumnIfMissing('gift_models', 'image_url', 'TEXT');
 addColumnIfMissing('gift_backdrops', 'image_url', 'TEXT');
+addColumnIfMissing('trades', 'ton_amount', "REAL NOT NULL DEFAULT 0");
+addColumnIfMissing('trades', 'ton_payer', 'TEXT');
+addColumnIfMissing('trades', 'fee_amount', "REAL NOT NULL DEFAULT 0");
 
 // === Подготовленные запросы: пользователи ===
 const userStatements = {
@@ -738,8 +753,8 @@ function listOwnedItemsForTgId(tgId) {
 
 const tradeStatements = {
     insertTrade: db.prepare(`
-        INSERT INTO trades (initiator_tg_id, recipient_tg_id)
-        VALUES (@initiator_tg_id, @recipient_tg_id)
+        INSERT INTO trades (initiator_tg_id, recipient_tg_id, ton_amount, ton_payer, fee_amount)
+        VALUES (@initiator_tg_id, @recipient_tg_id, @ton_amount, @ton_payer, @fee_amount)
     `),
     insertItem: db.prepare(`INSERT INTO trade_items (trade_id, listing_id, side) VALUES (?, ?, ?)`),
     findById: db.prepare('SELECT * FROM trades WHERE id = ?'),
@@ -753,10 +768,25 @@ const tradeStatements = {
 
 /** Создаёт трейд + строки предметов одной транзакцией. Владение предметами
  * должна была уже проверить вызывающая сторона (маршрут в server.js) —
- * здесь только запись. */
-function createTrade({ initiator_tg_id, recipient_tg_id, initiatorListingIds, recipientListingIds }) {
+ * здесь только запись. Резерв денег (комиссия + доплата инициатора, если
+ * есть) тоже делает вызывающая сторона ДО вызова этой функции. */
+function createTrade({
+    initiator_tg_id,
+    recipient_tg_id,
+    initiatorListingIds,
+    recipientListingIds,
+    ton_amount = 0,
+    ton_payer = null,
+    fee_amount = 0,
+}) {
     const run = db.transaction(() => {
-        const info = tradeStatements.insertTrade.run({ initiator_tg_id, recipient_tg_id });
+        const info = tradeStatements.insertTrade.run({
+            initiator_tg_id,
+            recipient_tg_id,
+            ton_amount,
+            ton_payer,
+            fee_amount,
+        });
         const tradeId = info.lastInsertRowid;
         for (const listingId of initiatorListingIds) {
             tradeStatements.insertItem.run(tradeId, listingId, 'initiator');
@@ -828,7 +858,10 @@ function verifyTradeItemsStillValid(trade) {
 }
 
 /** Принять трейд: recipient подтверждает обмен. Меняет владельца всех
- * предметов местами в одной транзакции. Возвращает { ok, trade, error }. */
+ * предметов местами в одной транзакции, проводит доплату TON (если есть)
+ * и оставляет комиссию площадки удержанной с инициатора (она уже была
+ * зарезервирована при создании трейда — см. POST /api/trades).
+ * Возвращает { ok, trade, error }. */
 function acceptTrade(tradeId, actingTgId) {
     const trade = getTradeWithItems(tradeId);
     if (!trade) return { ok: false, error: 'Трейд не найден' };
@@ -836,8 +869,25 @@ function acceptTrade(tradeId, actingTgId) {
     if (trade.status !== 'pending') return { ok: false, error: 'Этот трейд уже закрыт' };
 
     if (!verifyTradeItemsStillValid(trade)) {
-        tradeStatements.setStatus.run('failed', 'Один из предметов больше недоступен', tradeId);
+        // Трейд не удался не по вине сторон (предмет продан/снят за время
+        // ожидания) — возвращаем инициатору всё, что было у него зарезервировано.
+        db.transaction(() => {
+            tradeStatements.setStatus.run('failed', 'Один из предметов больше недоступен', tradeId);
+            refundInitiatorReserve(trade);
+        })();
         return { ok: false, error: 'Один из предметов уже продан или недоступен — трейд отменён' };
+    }
+
+    // Доплату от получателя (если это его сторона доплаты) списываем ЗДЕСЬ,
+    // а не при создании трейда — до этого момента получатель ещё не соглашался
+    // ни на что, и его баланс трогать нельзя. Если средств не хватает, трейд
+    // остаётся pending — получатель может пополнить баланс и принять снова.
+    if (trade.ton_payer === 'recipient' && trade.ton_amount > 0) {
+        try {
+            adjustBalance(trade.recipient_tg_id, -trade.ton_amount);
+        } catch (e) {
+            return { ok: false, error: `Не хватает баланса для доплаты ${trade.ton_amount} TON` };
+        }
     }
 
     db.transaction(() => {
@@ -848,6 +898,25 @@ function acceptTrade(tradeId, actingTgId) {
             transferListingToBuyer(item.id, trade.initiator_tg_id);
         }
         tradeStatements.setStatus.run('accepted', null, tradeId);
+
+        // Доплата TON: сторона-плательщик уже рассчиталась (инициатор — при
+        // создании трейда, получатель — чуть выше), теперь зачисляем деньги
+        // получателю доплаты.
+        if (trade.ton_amount > 0) {
+            if (trade.ton_payer === 'initiator') {
+                const payee = adjustBalance(trade.recipient_tg_id, trade.ton_amount);
+                createTransaction({ tg_id: trade.recipient_tg_id, type: 'trade_topup_in', amount: trade.ton_amount });
+                createTransaction({ tg_id: trade.initiator_tg_id, type: 'trade_topup_out', amount: -trade.ton_amount });
+            } else if (trade.ton_payer === 'recipient') {
+                adjustBalance(trade.initiator_tg_id, trade.ton_amount);
+                createTransaction({ tg_id: trade.initiator_tg_id, type: 'trade_topup_in', amount: trade.ton_amount });
+                createTransaction({ tg_id: trade.recipient_tg_id, type: 'trade_topup_out', amount: -trade.ton_amount });
+            }
+        }
+
+        // Комиссия площадки: уже удержана с инициатора при создании трейда —
+        // при успешном приёме она просто не возвращается (никакого движения
+        // денег здесь больше не требуется).
 
         const logSide = (tgId, itemsGiven, itemsReceived) => {
             itemsGiven.forEach(gift => createTransaction({
@@ -874,23 +943,40 @@ function acceptTrade(tradeId, actingTgId) {
     return { ok: true, trade: getTradeWithItems(tradeId) };
 }
 
+/** Возвращает инициатору всё, что было у него зарезервировано при создании
+ * трейда (комиссия + доплата, если доплачивал он) — используется при
+ * decline/cancel/failed, когда трейд не состоялся. */
+function refundInitiatorReserve(trade) {
+    const refund = (trade.fee_amount || 0) + (trade.ton_payer === 'initiator' ? (trade.ton_amount || 0) : 0);
+    if (refund > 1e-9) {
+        adjustBalance(trade.initiator_tg_id, refund);
+        createTransaction({ tg_id: trade.initiator_tg_id, type: 'trade_fee_refund', amount: refund });
+    }
+}
+
 function declineTrade(tradeId, actingTgId) {
-    const trade = getTradeById(tradeId);
+    const trade = getTradeWithItems(tradeId);
     if (!trade) return { ok: false, error: 'Трейд не найден' };
     if (trade.recipient_tg_id !== actingTgId) return { ok: false, error: 'Это не ваше предложение обмена' };
     if (trade.status !== 'pending') return { ok: false, error: 'Этот трейд уже закрыт' };
 
-    tradeStatements.setStatus.run('declined', null, tradeId);
+    db.transaction(() => {
+        tradeStatements.setStatus.run('declined', null, tradeId);
+        refundInitiatorReserve(trade);
+    })();
     return { ok: true, trade: getTradeWithItems(tradeId) };
 }
 
 function cancelTrade(tradeId, actingTgId) {
-    const trade = getTradeById(tradeId);
+    const trade = getTradeWithItems(tradeId);
     if (!trade) return { ok: false, error: 'Трейд не найден' };
     if (trade.initiator_tg_id !== actingTgId) return { ok: false, error: 'Это не ваш трейд' };
     if (trade.status !== 'pending') return { ok: false, error: 'Этот трейд уже закрыт' };
 
-    tradeStatements.setStatus.run('cancelled', null, tradeId);
+    db.transaction(() => {
+        tradeStatements.setStatus.run('cancelled', null, tradeId);
+        refundInitiatorReserve(trade);
+    })();
     return { ok: true, trade: getTradeWithItems(tradeId) };
 }
 
