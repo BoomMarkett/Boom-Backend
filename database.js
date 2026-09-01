@@ -723,6 +723,41 @@ function findMatchingOrdersForListing(listing) {
 }
 
 /**
+ * Возвращает ВСЕ активные листинги, под которые подходит конкретный ордер
+ * (обратная сторона findMatchingOrdersForListing) — используется, чтобы
+ * уведомить владельцев подходящих лотов сразу при создании нового ордера
+ * ("вам предложили купить ваш подарок"), без фильтра по цене — здесь важен
+ * сам факт совпадения трейтов, а не мгновенное исполнение сделки.
+ */
+function findMatchingListingsForOrder(order) {
+    return db.prepare(`
+        SELECT l.*,
+            c.name AS collection_name, c.image_url AS collection_image,
+            gm.name AS model_name, gm.image_url AS model_image,
+            gb.name AS backdrop_name, gb.color_hex AS backdrop_color,
+            gs.name AS symbol_name, gs.icon_url AS symbol_icon
+        FROM listings l
+        JOIN collections c ON c.id = l.collection_id
+        LEFT JOIN gift_models gm ON gm.id = l.model_id
+        LEFT JOIN gift_backdrops gb ON gb.id = l.backdrop_id
+        LEFT JOIN gift_symbols gs ON gs.id = l.symbol_id
+        WHERE l.status = 'active'
+          AND l.owner_tg_id != @buyer_tg_id
+          AND l.collection_id = @collection_id
+          AND (@model_id IS NULL OR l.model_id = @model_id)
+          AND (@backdrop_id IS NULL OR l.backdrop_id = @backdrop_id)
+          AND (@symbol_id IS NULL OR l.symbol_id = @symbol_id)
+        ORDER BY l.created_at ASC
+    `).all({
+        buyer_tg_id: order.buyer_tg_id,
+        collection_id: order.collection_id,
+        model_id: order.model_id,
+        backdrop_id: order.backdrop_id,
+        symbol_id: order.symbol_id,
+    });
+}
+
+/**
  * Сводный список предложений (подходящих активных ордеров) по ВСЕМ активным
  * лотам пользователя разом — используется вкладкой "Ордеры → Предложения",
  * чтобы продавец видел все входящие офферы в одном месте, без похода в
@@ -1073,6 +1108,7 @@ module.exports = {
     listOrderHistoryForUser,
     findMatchingOrder,
     findMatchingOrdersForListing,
+    findMatchingListingsForOrder,
     listOffersForUser,
     declineOfferAsSeller,
     searchUsersByUsername,

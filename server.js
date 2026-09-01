@@ -26,6 +26,7 @@ const {
     listActiveOrdersForUser,
     listOrderHistoryForUser,
     findMatchingOrder,
+    findMatchingListingsForOrder,
     listOffersForUser,
     searchUsersByUsername,
     listOwnedItemsForTgId,
@@ -53,7 +54,60 @@ if (!JWT_SECRET) {
     console.warn('⚠️  JWT_SECRET не задан — выдача токенов сессии всегда будет отклоняться!');
 }
 
+/** "Chill Flame #433898" — как называют подарок в самом Telegram. */
+function giftDisplayName(details) {
+    const name = details.model_name || details.collection_name || 'Подарок';
+    return details.gift_number ? `${name} #${details.gift_number}` : name;
+}
+
 const TOKEN_LIFETIME = '24h';
+
+// =====================================================================
+// УВЕДОМЛЕНИЯ В TELEGRAM (через Bot API — тот же BOT_TOKEN, что и для
+// проверки initData). Отправляем при продаже подарка, новых офферах на
+// свой лот и трейдах — с картинкой подарка и кнопкой "Открыть BoomMarket".
+// Бот может писать пользователю, только если тот уже открывал бота (это
+// условие обычно уже выполнено — авторизация в Mini App идёт через него).
+// =====================================================================
+const TELEGRAM_API_BASE = `https://api.telegram.org/bot${BOT_TOKEN}`;
+// URL мини-приложения — тот же, что в tonconnect-manifest.json.
+const MINI_APP_URL = process.env.MINI_APP_URL || 'https://holdenholden72-dotcom.github.io/BoomMarket/';
+
+/**
+ * Отправляет пользователю уведомление в бота: с картинкой подарка (если
+ * есть photoUrl) или просто текстом, плюс кнопка "Открыть BoomMarket".
+ * Никогда не бросает исключение наружу — сбой уведомления не должен
+ * ломать основной запрос (продажу/трейд/оффер), только логируется.
+ */
+async function notifyTelegram(tgId, text, photoUrl) {
+    if (!BOT_TOKEN || !tgId) return;
+
+    const replyMarkup = {
+        inline_keyboard: [[
+            { text: '🚀 Открыть BoomMarket', web_app: { url: MINI_APP_URL } },
+        ]],
+    };
+
+    try {
+        const method = photoUrl ? 'sendPhoto' : 'sendMessage';
+        const body = photoUrl
+            ? { chat_id: tgId, photo: photoUrl, caption: text, parse_mode: 'HTML', reply_markup: replyMarkup }
+            : { chat_id: tgId, text, parse_mode: 'HTML', reply_markup: replyMarkup };
+
+        const res = await fetch(`${TELEGRAM_API_BASE}/${method}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+
+        if (!res.ok) {
+            const errText = await res.text();
+            console.error(`⚠️  Не удалось отправить Telegram-уведомление пользователю ${tgId}:`, errText);
+        }
+    } catch (e) {
+        console.error(`⚠️  Ошибка отправки Telegram-уведомления пользователю ${tgId}:`, e.message);
+    }
+}
 
 // Проверяет, что сумма — число в заданном диапазоне с не более чем одним
 // знаком после запятой (0.2, 1.4, 10.7, 10 — можно; 1.76, 9.87 — нельзя).
@@ -1042,6 +1096,18 @@ app.post('/api/orders', requireAuth, (req, res) => {
         max_price: parsedPrice,
     });
 
+    // Уведомляем владельцев всех подходящих активных лотов — им кинули
+    // новое предложение на их подарок (совпадение по трейтам, необязательно
+    // мгновенная сделка — продавец сам решает, принимать ли).
+    const matchingListings = findMatchingListingsForOrder(order);
+    for (const l of matchingListings) {
+        notifyTelegram(
+            l.owner_tg_id,
+            `💰 Вам предложили <b>${parsedPrice} 💎</b> за <b>${giftDisplayName(l)}</b>`,
+            l.model_image || l.collection_image
+        );
+    }
+
     res.json({ ok: true, order: getOrderWithDetails(order.id), balance: buyer.balance });
 });
 
@@ -1121,6 +1187,12 @@ app.post('/api/listings/:id/buy', requireAuth, (req, res) => {
     };
     createTransaction({ tg_id: req.tgId, type: 'buy', amount: -listing.price, ...giftSnapshot });
     createTransaction({ tg_id: listing.owner_tg_id, type: 'sell', amount: sellerPayout, ...giftSnapshot });
+
+    notifyTelegram(
+        sellerTgId,
+        `🎉 <b>${giftDisplayName(listing)}</b> продан за ${listing.price} 💎\nНа баланс зачислено ${sellerPayout.toFixed(2)} 💎`,
+        listing.model_image || listing.collection_image
+    );
 
     res.json({ ok: true, balance: buyer.balance, listing: updatedListing });
 });
@@ -1281,6 +1353,12 @@ app.post('/api/listings/:id/accept-offer', requireAuth, (req, res) => {
     createTransaction({ tg_id: order.buyer_tg_id, type: 'buy', amount: -order.max_price, ...giftSnapshot });
     createTransaction({ tg_id: req.tgId, type: 'sell', amount: sellerPayout, ...giftSnapshot });
 
+    notifyTelegram(
+        order.buyer_tg_id,
+        `✅ Ваше предложение принято!\n<b>${giftDisplayName(details)}</b> теперь ваш`,
+        details.model_image || details.collection_image
+    );
+
     res.json({ ok: true, listing: soldListing, balance: seller.balance });
 });
 
@@ -1383,6 +1461,16 @@ app.post('/api/trades', requireAuth, (req, res) => {
         fee_amount: TRADE_FEE_TON,
     });
 
+    const firstItem = trade.initiatorItems[0];
+    const itemsLabel = trade.initiatorItems.length > 1
+        ? `${giftDisplayName(firstItem)} и ещё ${trade.initiatorItems.length - 1} шт.`
+        : giftDisplayName(firstItem);
+    notifyTelegram(
+        recipientTgId,
+        `🔄 Вам предложили обмен: <b>${itemsLabel}</b>${tonAmount && tonPayer === 'initiator' ? ` + ${tonAmount} 💎 доплата` : ''}`,
+        firstItem.model_image || firstItem.collection_image
+    );
+
     res.json({ ok: true, trade, balance: initiator.balance });
 });
 
@@ -1415,6 +1503,14 @@ app.post('/api/trades/:id/accept', requireAuth, (req, res) => {
         return res.status(400).json({ ok: false, error: result.error });
     }
     const user = getUserByTgId(req.tgId);
+
+    const firstItem = result.trade.recipientItems[0] || result.trade.initiatorItems[0];
+    notifyTelegram(
+        result.trade.initiator_tg_id,
+        `✅ Ваш обмен принят! <b>${giftDisplayName(firstItem)}</b>${result.trade.recipientItems.length > 1 ? ` и ещё ${result.trade.recipientItems.length - 1} шт.` : ''} теперь у вас`,
+        firstItem.model_image || firstItem.collection_image
+    );
+
     res.json({ ok: true, trade: result.trade, balance: user.balance });
 });
 
@@ -1425,6 +1521,12 @@ app.post('/api/trades/:id/decline', requireAuth, (req, res) => {
         return res.status(400).json({ ok: false, error: result.error });
     }
     const user = getUserByTgId(req.tgId);
+
+    notifyTelegram(
+        result.trade.initiator_tg_id,
+        `❌ Ваше предложение обмена отклонено`
+    );
+
     res.json({ ok: true, trade: result.trade, balance: user.balance });
 });
 
