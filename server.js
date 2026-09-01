@@ -723,6 +723,87 @@ app.post('/api/games/dice/roll', requireAuth, (req, res) => {
     });
 });
 
+// =====================================================================
+// ИГРА "ПЛИНКО" (Plinko) — шарик падает через 8 рядов колышков в одну
+// из 9 корзин с разным множителем внизу
+// =====================================================================
+//
+// Правила:
+//   - Игрок выбирает уровень риска (низкий/средний/высокий) — от него
+//     зависит таблица множителей в корзинах — и делает ставку.
+//   - Шарик "падает" через 8 рядов колышков, на каждом ряду случайно
+//     уходя влево или вправо (честная монетка, как в реальном
+//     Galton board), и попадает в одну из 9 корзин внизу.
+//   - Выигрыш = ставка × множитель той корзины, в которую попал шарик.
+//   - Чем выше риск, тем больше разброс множителей: у крайних корзин
+//     множитель выше, у центральных — ниже (в том числе меньше 1×).
+const PLINKO_MIN_BET = 0.3;
+const PLINKO_MAX_BET = 1000;
+const PLINKO_ROWS = 8; // 8 рядов колышков -> 9 корзин внизу (0..8 "вправо")
+
+// Таблицы множителей по уровню риска — симметричны, индекс = сколько раз
+// шарик ушёл "вправо" из 8 рядов (0..8). Подобраны так, чтобы среднее
+// матожидание было в районе 93–97% (комиссия площадки ~3–7%, растёт
+// вместе с риском — как и в большинстве реализаций Plinko).
+const PLINKO_MULTIPLIERS = {
+    low:    [2.8, 1.4, 1.1, 1.0, 0.6, 1.0, 1.1, 1.4, 2.8],
+    medium: [6.4, 2.4, 1.4, 0.8, 0.4, 0.8, 1.4, 2.4, 6.4],
+    high:   [16.0, 4.0, 1.5, 0.4, 0.2, 0.4, 1.5, 4.0, 16.0],
+};
+
+// === Бросить шарик: сервер честно генерирует путь через все 8 рядов
+// (8 независимых честных "монеток"), из него однозначно следует, в какую
+// корзину попадёт шарик — клиент лишь проигрывает анимацию по этому пути ===
+app.post('/api/games/plinko/drop', requireAuth, (req, res) => {
+    const bet = parseFloat(req.body.bet);
+    const risk = ['low', 'medium', 'high'].includes(req.body.risk) ? req.body.risk : null;
+
+    if (!isValidAmount(bet, PLINKO_MIN_BET, PLINKO_MAX_BET)) {
+        return res.status(400).json({
+            ok: false,
+            error: `Ставка должна быть от ${PLINKO_MIN_BET} до ${PLINKO_MAX_BET} TON, максимум с одним знаком после запятой`,
+        });
+    }
+    if (!risk) {
+        return res.status(400).json({ ok: false, error: 'Уровень риска должен быть low, medium или high' });
+    }
+
+    // Путь шарика: 8 честных монеток (true = вправо). Итоговая корзина —
+    // просто количество "вправо" (классическое биномиальное распределение
+    // доски Гальтона).
+    const path = [];
+    let slotIndex = 0;
+    for (let i = 0; i < PLINKO_ROWS; i++) {
+        const goRight = Math.random() < 0.5;
+        path.push(goRight);
+        if (goRight) slotIndex++;
+    }
+
+    const multiplier = PLINKO_MULTIPLIERS[risk][slotIndex];
+    const winAmount = Math.round(bet * multiplier * 100) / 100;
+    const netDelta = Math.round((winAmount - bet) * 100) / 100;
+
+    let user;
+    try {
+        user = adjustBalance(req.tgId, netDelta);
+    } catch (e) {
+        return res.status(400).json({ ok: false, error: 'Недостаточно средств на балансе' });
+    }
+
+    createTransaction({ tg_id: req.tgId, type: 'game_plinko', amount: netDelta });
+
+    res.json({
+        ok: true,
+        path,
+        slotIndex,
+        risk,
+        multiplier,
+        betAmount: bet,
+        winAmount,
+        balance: user.balance,
+    });
+});
+
 // === Создать ордер на покупку (сумма сразу резервируется на балансе) ===
 app.post('/api/orders', requireAuth, (req, res) => {
     const { collectionId, modelId, backdropId, symbolId, maxPrice } = req.body;
