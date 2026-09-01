@@ -693,43 +693,30 @@ app.get('/api/games/bomber/state', requireAuth, (req, res) => {
 //     засчитывается автоматически по максимальному множителю раунда.
 //
 // Каждый этаж — независимое испытание (ловушки каждого этажа выбираются
-// заново, вне зависимости от других этажей), поэтому множитель считается
-// произведением честных множителей каждого пройденного этажа
-// (плиток_на_этаже / безопасных_плиток_на_этаже), из которого в конце
-// вычитается комиссия площадки.
+// заново, вне зависимости от других этажей). Множитель за каждый этаж
+// задан явно (не считается по формуле от количества плиток/ловушек) —
+// значения кумулятивные, то есть это итоговый множитель ставки при
+// кэшауте именно на этом этаже.
 const TOWER_FLOOR_CONFIG = [
-    { tiles: 8, traps: 3 }, // этаж 1 — кумулятивно ~x1.52
-    { tiles: 4, traps: 1 }, // этаж 2 — кумулятивно ~x2.03
-    { tiles: 6, traps: 2 }, // этаж 3 — кумулятивно ~x3.04
-    { tiles: 7, traps: 1 }, // этаж 4 — кумулятивно ~x3.55
-    { tiles: 7, traps: 2 }, // этаж 5 (вершина) — кумулятивно ~x4.97
+    { tiles: 6, traps: 3, multiplier: 1.5 }, // этаж 1
+    { tiles: 5, traps: 3, multiplier: 2 },   // этаж 2
+    { tiles: 4, traps: 2, multiplier: 2.5 }, // этаж 3
+    { tiles: 3, traps: 1, multiplier: 3 },   // этаж 4
+    { tiles: 2, traps: 1, multiplier: 5 },   // этаж 5 (вершина)
 ];
 const TOWER_FLOORS = TOWER_FLOOR_CONFIG.length;
 const TOWER_MIN_BET = 0.3;
 const TOWER_MAX_BET = 1000;
-const TOWER_HOUSE_EDGE = 0.05; // 5% комиссии площадки, зашита в множитель
 
 // Активные раунды хранятся в памяти процесса (как и у слотов/рулетки/бомбера) —
 // раунд живёт от старта до кэшаута/проигрыша, между рестартами сервера
 // персистентность не нужна. Один активный раунд на пользователя одновременно.
 const towerActiveGames = new Map(); // tgId -> { bet, trapsByFloor:[[...]], climbed, path:[], startedAt }
 
-function towerFloorFactor(floorIndex) {
-    const cfg = TOWER_FLOOR_CONFIG[floorIndex];
-    return cfg.tiles / (cfg.tiles - cfg.traps);
-}
-
-function towerFairMultiplier(floorsClimbed) {
-    let mult = 1;
-    for (let i = 0; i < floorsClimbed; i++) {
-        mult *= towerFloorFactor(i);
-    }
-    return mult;
-}
-
 function towerMultiplier(floorsClimbed) {
     if (floorsClimbed <= 0) return 1;
-    return towerFairMultiplier(floorsClimbed) * (1 - TOWER_HOUSE_EDGE);
+    const cfg = TOWER_FLOOR_CONFIG[floorsClimbed - 1];
+    return cfg ? cfg.multiplier : 1;
 }
 
 function towerPublicState(game) {
