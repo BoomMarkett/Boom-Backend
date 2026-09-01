@@ -20,6 +20,7 @@ const {
     createTransaction,
     listTransactionsForUser,
     createOrder,
+    hasOwnMatchingListing,
     getOrderById,
     getOrderWithDetails,
     setOrderStatus,
@@ -27,6 +28,7 @@ const {
     listOrderHistoryForUser,
     findMatchingOrder,
     listOffersForUser,
+    declineOfferAsSeller,
     searchUsersByUsername,
     listOwnedItemsForTgId,
     createTrade,
@@ -41,6 +43,16 @@ const {
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Запрещаем кэширование ответов API — иначе некоторые браузеры/WebView
+// (в т.ч. внутри Telegram) могут отдать закэшированный GET-ответ повторно,
+// и после действий вроде отмены ордера или трейда список на экране будет
+// какое-то время показывать устаревшие данные, даже если сервер уже всё
+// обновил.
+app.use('/api', (req, res, next) => {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+    next();
+});
 
 const BOT_TOKEN = process.env.BOT_TOKEN || '';
 const JWT_SECRET = process.env.JWT_SECRET || '';
@@ -666,83 +678,6 @@ app.get('/api/games/bomber/state', requireAuth, (req, res) => {
     res.json({ ok: true, game: bomberPublicState(game) });
 });
 
-// =====================================================================
-// ИГРА "КОСТИ" (Dice) — классический "roll under / roll over"
-// =====================================================================
-//
-// Правила:
-//   - Игрок выбирает число-цель (от 2 до 98) и направление броска:
-//     "Меньше" (Under) — выигрыш, если результат броска МЕНЬШЕ цели,
-//     "Больше" (Over) — выигрыш, если результат броска БОЛЬШЕ цели.
-//   - Результат броска — случайное число от 0.00 до 99.99 (сервер).
-//   - Чем меньше шанс на выигрыш (уже выбранный диапазон), тем выше
-//     множитель — и наоборот. Это регулируется положением цели на шкале.
-//   - Шанс на выигрыш и множитель показываются игроку ДО броска — можно
-//     свободно двигать ползунок, ничего не списывается, пока не нажата
-//     кнопка "Бросить кости".
-const DICE_MIN_BET = 0.3;
-const DICE_MAX_BET = 1000;
-const DICE_MIN_TARGET = 2;
-const DICE_MAX_TARGET = 98;
-const DICE_HOUSE_EDGE = 0.05; // те же 5%, что и у остальных игр
-
-function diceWinChance(target, direction) {
-    // "Under": выигрыш при roll < target -> шанс = target%
-    // "Over":  выигрыш при roll > target -> шанс = (100 - target)%
-    return direction === 'over' ? (100 - target) : target;
-}
-
-function diceMultiplier(target, direction) {
-    const chance = diceWinChance(target, direction);
-    return (100 / chance) * (1 - DICE_HOUSE_EDGE);
-}
-
-// === Бросить кости: всё считается на сервере за один запрос — ставка
-// списывается и выигрыш (если есть) начисляется в этом же ответе ===
-app.post('/api/games/dice/roll', requireAuth, (req, res) => {
-    const bet = parseFloat(req.body.bet);
-    const target = parseInt(req.body.target, 10);
-    const direction = req.body.direction === 'over' ? 'over' : 'under';
-
-    if (!isValidAmount(bet, DICE_MIN_BET, DICE_MAX_BET)) {
-        return res.status(400).json({
-            ok: false,
-            error: `Ставка должна быть от ${DICE_MIN_BET} до ${DICE_MAX_BET} TON, максимум с одним знаком после запятой`,
-        });
-    }
-    if (!Number.isInteger(target) || target < DICE_MIN_TARGET || target > DICE_MAX_TARGET) {
-        return res.status(400).json({ ok: false, error: `Цель должна быть числом от ${DICE_MIN_TARGET} до ${DICE_MAX_TARGET}` });
-    }
-
-    // Бросок — случайное число 0.00–99.99 с шагом 0.01.
-    const roll = Math.floor(Math.random() * 10000) / 100;
-    const isWin = direction === 'over' ? roll > target : roll < target;
-    const multiplier = Math.round(diceMultiplier(target, direction) * 100) / 100;
-    const winAmount = isWin ? Math.round(bet * multiplier * 100) / 100 : 0;
-    const netDelta = Math.round((winAmount - bet) * 100) / 100;
-
-    let user;
-    try {
-        user = adjustBalance(req.tgId, netDelta);
-    } catch (e) {
-        return res.status(400).json({ ok: false, error: 'Недостаточно средств на балансе' });
-    }
-
-    createTransaction({ tg_id: req.tgId, type: 'game_dice', amount: netDelta });
-
-    res.json({
-        ok: true,
-        roll,
-        target,
-        direction,
-        win: isWin,
-        multiplier,
-        betAmount: bet,
-        winAmount,
-        balance: user.balance,
-    });
-});
-
 // === Создать ордер на покупку (сумма сразу резервируется на балансе) ===
 app.post('/api/orders', requireAuth, (req, res) => {
     const { collectionId, modelId, backdropId, symbolId, maxPrice } = req.body;
@@ -753,6 +688,13 @@ app.post('/api/orders', requireAuth, (req, res) => {
     }
     if (!isValidAmount(parsedPrice, 0.1, 100000)) {
         return res.status(400).json({ ok: false, error: 'Цена должна быть от 0.1 до 100000, максимум с одним знаком после запятой' });
+    }
+
+    // Нельзя создать ордер на покупку, который сразу же "сматчится" с
+    // собственным активным лотом — иначе продавец видел бы у себя же
+    // предложение купить собственный товар.
+    if (hasOwnMatchingListing(req.tgId, { collectionId, modelId, backdropId, symbolId })) {
+        return res.status(400).json({ ok: false, error: 'У вас уже есть подходящий под этот ордер лот на продаже — нельзя ставить ордер на свой же товар' });
     }
 
     let buyer;
@@ -948,6 +890,24 @@ app.post('/api/listings/:id/relist', requireAuth, (req, res) => {
 app.get('/api/my-offers', requireAuth, (req, res) => {
     const offers = listOffersForUser(req.tgId);
     res.json({ ok: true, offers });
+});
+
+// === Отклонить предложение: полностью отменяет ЧУЖОЙ ордер на покупку,
+// который сматчился с вашим лотом — деньги возвращаются покупателю, ордер
+// пропадает из "Предложений" у всех продавцов (не только у вас). ===
+app.post('/api/my-offers/:orderId/dismiss', requireAuth, (req, res) => {
+    const orderId = parseInt(req.params.orderId, 10);
+    const listingId = parseInt(req.body.listingId, 10);
+
+    if (!Number.isInteger(orderId) || !Number.isInteger(listingId)) {
+        return res.status(400).json({ ok: false, error: 'Некорректные данные' });
+    }
+
+    const result = declineOfferAsSeller(orderId, listingId, req.tgId);
+    if (!result.ok) {
+        return res.status(400).json({ ok: false, error: result.error });
+    }
+    res.json({ ok: true });
 });
 
 // === Продать лот конкретному ордеру-предложению (владелец сам выбирает,
