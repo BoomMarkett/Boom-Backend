@@ -1,0 +1,1604 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>Telegram NFT Market</title>
+    <link rel="stylesheet" href="style.css?v=10">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://unpkg.com/@tonconnect/ui@latest/dist/tonconnect-ui.min.js"></script>
+</head>
+<body>
+
+    <!-- ЭКРАН 1: МАРКЕТ -->
+    <div id="marketScreen" class="screen active">
+        <!-- Верхняя панель -->
+<header class="header">
+    <div class="user-profile">
+        <img class="avatar" id="openProfileBtn" src="" alt="Avatar">
+        <div class="balance">
+            <span class="diamond-icon">💎</span>
+            <div class="balance-num user-balance">0</div>
+           <button class="add-btn" id="plusDepositBtn">+</button>
+        </div>
+    </div>
+    <div class="wallet-container">
+        <button class="wallet-btn" id="walletBtn"></button>
+    </div>
+</header>
+
+        <!-- Поиск и фильтры -->
+        <div class="filter-section">
+            <div class="search-box">
+                <span class="search-icon">🔍</span>
+                <input type="text" id="searchInput" placeholder="Поиск по названию NFT">
+            </div>
+
+            <div class="filter-scroll">
+                <button class="sort-trigger-btn" id="sortTriggerBtn">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M6 12h12M10 18h4"/></svg>
+                </button>
+                <!-- Кнопки-пилюли открывают общую модалку мультивыбора (см. #filterPickerModal) -->
+                <button class="filter-pill" id="filterNftBtn" data-filter-type="collection">NFT</button>
+                <button class="filter-pill" id="filterModelBtn" data-filter-type="model">Модель</button>
+                <button class="filter-pill" id="filterBgBtn" data-filter-type="backdrop">Фон</button>
+                <button class="filter-pill" id="filterSymbolBtn" data-filter-type="symbol">Символ</button>
+            </div>
+        </div>
+
+        <!-- Сетка товаров (Маркет) -->
+        <main class="market-grid" id="marketGrid">
+            <!-- Карточки генерируются через JS -->
+        </main>
+    </div>
+
+    <!-- Модальное окно сортировки (Маркет) -->
+    <div class="filter-modal" id="sortModal">
+        <div class="filter-picker-content">
+            <div class="filter-picker-header">
+                <h3>Сортировка</h3>
+                <button class="close-modal-btn" id="closeSortModal">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <ul class="filter-picker-list" id="sortList">
+                <li class="filter-picker-row" data-sort="time_asc">
+                    <input type="checkbox">
+                    <span class="filter-picker-name">Время размещения (По возрастанию)</span>
+                </li>
+                <li class="filter-picker-row" data-sort="time_desc">
+                    <input type="checkbox">
+                    <span class="filter-picker-name">Время размещения (По убыванию)</span>
+                </li>
+                <li class="filter-picker-row" data-sort="price_asc">
+                    <input type="checkbox">
+                    <span class="filter-picker-name">Цена (По возрастанию)</span>
+                </li>
+                <li class="filter-picker-row" data-sort="price_desc">
+                    <input type="checkbox">
+                    <span class="filter-picker-name">Цена (По убыванию)</span>
+                </li>
+                <li class="filter-picker-row" data-sort="num_asc">
+                    <input type="checkbox">
+                    <span class="filter-picker-name">Номер подарка (По возрастанию)</span>
+                </li>
+                <li class="filter-picker-row" data-sort="num_desc">
+                    <input type="checkbox">
+                    <span class="filter-picker-name">Номер подарка (По убыванию)</span>
+                </li>
+            </ul>
+            <div class="filter-picker-footer">
+                <button class="filter-picker-reset" id="sortReset">Сбросить</button>
+                <button class="filter-picker-apply" id="sortApply">Показать результаты</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Модальное окно сортировки для Хранилища -->
+    <div class="filter-modal" id="storageSortModal">
+        <div class="filter-picker-content">
+            <div class="filter-picker-header">
+                <h3>Сортировка</h3>
+                <button class="close-modal-btn" id="closeStorageSortModal">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <ul class="filter-picker-list" id="storageSortList">
+                <li class="filter-picker-row" data-sort="date_desc">
+                    <input type="checkbox">
+                    <span class="filter-picker-name">Дата получения (Сначала новые)</span>
+                </li>
+                <li class="filter-picker-row" data-sort="date_asc">
+                    <input type="checkbox">
+                    <span class="filter-picker-name">Дата получения (Сначала старые)</span>
+                </li>
+                <li class="filter-picker-row" data-sort="num_asc">
+                    <input type="checkbox">
+                    <span class="filter-picker-name">Номер подарка (По возрастанию)</span>
+                </li>
+                <li class="filter-picker-row" data-sort="num_desc">
+                    <input type="checkbox">
+                    <span class="filter-picker-name">Номер подарка (По убыванию)</span>
+                </li>
+            </ul>
+            <div class="filter-picker-footer">
+                <button class="filter-picker-reset" id="storageSortReset">Сбросить</button>
+                <button class="filter-picker-apply" id="storageSortApply">Показать результаты</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Общая модалка мультивыбора: переиспользуется для NFT / Модель / Фон / Символ на
+         обоих экранах (Маркет и Хранилище) — содержимое списка каждый раз заполняется
+         в app.js под конкретный фильтр и контекст. -->
+    <div class="filter-modal" id="filterPickerModal">
+        <div class="filter-picker-content">
+            <div class="filter-picker-header">
+                <h3 id="filterPickerTitle">Коллекция</h3>
+                <button class="close-modal-btn" id="closeFilterPicker">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <div class="filter-picker-search">
+                <span class="search-icon">🔍</span>
+                <input type="text" id="filterPickerSearch" placeholder="Поиск">
+            </div>
+            <label class="filter-picker-select-all">
+                <input type="checkbox" id="filterPickerSelectAll">
+                <span>Выбрать все</span>
+            </label>
+            <ul class="filter-picker-list" id="filterPickerList">
+                <!-- Строки чекбоксов генерируются через JS -->
+            </ul>
+            <div class="filter-picker-footer">
+                <button class="filter-picker-reset" id="filterPickerReset">Сбросить</button>
+                <button class="filter-picker-apply" id="filterPickerApply">Показать результаты</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ЭКРАН 2: ПРОФИЛЬ -->
+    <div id="profileScreen" class="screen">
+        <header class="profile-header">
+            <button class="back-btn" id="backToMarketBtn">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                Назад
+            </button>
+        </header>
+
+        <div class="profile-content">
+            <!-- Баланс и статистика -->
+            <div class="profile-top-card">
+                <div class="balance-box">
+                    <div class="diamond-big">💎</div>
+                   <div class="balance-num user-balance">0</div>
+                    <div class="balance-label">Баланс GRAM</div>
+                </div>
+                <div class="stats-column">
+                    <div class="stat-mini-card" id="ordersStatCard" role="button" tabindex="0">
+                        <span class="stat-title">Ордера</span>
+                        <span class="stat-value orders-stat-value">0</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Быстрые действия -->
+            <div class="section-title">БЫСТРЫЕ ДЕЙСТВИЯ</div>
+            <div class="actions-grid">
+                <button class="action-btn" id="withdrawBtn">
+                    <span class="action-icon">↓</span>
+                    <span>Вывод</span>
+                </button>
+                <button class="action-btn" id="quickDepositBtn">
+                    <span class="action-icon">+</span>
+                    <span>Ввод</span>
+                </button>
+                <button class="action-btn" id="addListingBtn">
+                    <span class="action-icon">🎁</span>
+                    <span>Добавить</span>
+                </button>
+            </div>
+
+            <!-- Игровой хаб — пока чисто визуальная заглушка, сами игры
+                 подключим позже. -->
+            <div class="section-title">ИГРЫ</div>
+            <div class="games-grid">
+                <button class="game-tile" data-game="coinflip">
+                    <span class="game-tile-icon">🪙</span>
+                    <span class="game-tile-name">Coinflip</span>
+                    <span class="game-tile-badge">Скоро</span>
+                </button>
+                <button class="game-tile" data-game="dice">
+                    <span class="game-tile-icon">🎲</span>
+                    <span class="game-tile-name">Кости</span>
+                </button>
+                <button class="game-tile" data-game="roulette">
+                    <span class="game-tile-icon">🎡</span>
+                    <span class="game-tile-name">Рулетка</span>
+                </button>
+                <button class="game-tile" data-game="slots">
+                    <span class="game-tile-icon">🎰</span>
+                    <span class="game-tile-name">Слоты</span>
+                </button>
+                <button class="game-tile" data-game="bomber">
+                    <span class="game-tile-icon">💣</span>
+                    <span class="game-tile-name">Бомбер</span>
+                </button>
+                <button class="game-tile" data-game="tower">
+                    <span class="game-tile-icon">🗼</span>
+                    <span class="game-tile-name">Башня</span>
+                </button>
+                <button class="game-tile" data-game="plinko">
+                    <span class="game-tile-icon">🎯</span>
+                    <span class="game-tile-name">Плинко</span>
+                </button>
+            </div>
+
+               <!-- Нижняя навигация -->
+    <nav class="bottom-nav">
+        <button class="nav-item" data-nav="market">
+            <span class="nav-icon">🏪</span>
+            <span class="nav-text">Маркет</span>
+        </button>
+        <button class="nav-item" data-nav="trade">
+
+            <span class="nav-icon">🔄</span>
+
+            <span class="nav-text">Трейд</span>
+
+        </button>
+        <button class="nav-item" data-nav="orders">
+            <span class="nav-icon">🧾</span>
+            <span class="nav-text">Ордеры</span>
+        </button>
+        <button class="nav-item" data-nav="history">
+            <span class="nav-icon">🕘</span>
+            <span class="nav-text">История</span>
+        </button>
+        <button class="nav-item" data-nav="storage">
+            <span class="nav-icon">📦</span>
+            <span class="nav-text">Хранилище</span>
+        </button>
+    </nav>
+        </div>
+    </div>
+
+    <!-- ЭКРАН 3: ИСТОРИЯ -->
+    <div id="historyScreen" class="screen">
+        <header class="profile-header">
+            <button class="back-btn" id="backToProfileFromHistoryBtn">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                Назад
+            </button>
+        </header>
+
+        <div class="profile-content">
+            <div class="section-title">ИСТОРИЯ ОПЕРАЦИЙ</div>
+
+            <ul class="history-list" id="historyList">
+                <!-- Строки генерируются через JS (см. loadHistory/renderHistoryList в app.js) -->
+            </ul>
+
+            <!-- Нижняя навигация -->
+            <nav class="bottom-nav">
+                <button class="nav-item" data-nav="market">
+                    <span class="nav-icon">🏪</span>
+                    <span class="nav-text">Маркет</span>
+                </button>
+                <button class="nav-item" data-nav="trade">
+
+                    <span class="nav-icon">🔄</span>
+
+                    <span class="nav-text">Трейд</span>
+
+                </button>
+                <button class="nav-item" data-nav="orders">
+                    <span class="nav-icon">🧾</span>
+                    <span class="nav-text">Ордеры</span>
+                </button>
+                <button class="nav-item active" data-nav="history">
+                    <span class="nav-icon">🕘</span>
+                    <span class="nav-text">История</span>
+                </button>
+                <button class="nav-item" data-nav="storage">
+                    <span class="nav-icon">📦</span>
+                    <span class="nav-text">Хранилище</span>
+                </button>
+            </nav>
+        </div>
+    </div>
+
+    <!-- ЭКРАН 4: ОРДЕРЫ -->
+    <div id="ordersScreen" class="screen">
+        <header class="profile-header">
+            <button class="back-btn" id="backToProfileFromOrdersBtn">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                Назад
+            </button>
+        </header>
+
+        <div class="profile-content">
+            <div class="section-title">ОРДЕРЫ НА ПОКУПКУ</div>
+
+            <!-- Создание ордера — размещено перед списком лотов/ордеров -->
+            <button class="action-btn orders-create-btn" id="openCreateOrderBtn">
+                <span class="action-icon">➕</span>
+                <span>Создать ордер</span>
+            </button>
+
+            <div class="orders-tabs" id="ordersTabs">
+                <button class="orders-tab active" data-orders-tab="active">Активные</button>
+                <button class="orders-tab" data-orders-tab="history">История</button>
+                <button class="orders-tab" data-orders-tab="offers">Предложения</button>
+            </div>
+
+            <ul class="history-list" id="ordersActiveList">
+                <!-- Строки генерируются через JS -->
+            </ul>
+            <ul class="history-list" id="ordersHistoryList" style="display:none;">
+                <!-- Строки генерируются через JS -->
+            </ul>
+            <ul class="history-list" id="ordersOffersList" style="display:none;">
+                <!-- Строки генерируются через JS -->
+            </ul>
+
+            <!-- Нижняя навигация -->
+            <nav class="bottom-nav">
+                <button class="nav-item" data-nav="market">
+                    <span class="nav-icon">🏪</span>
+                    <span class="nav-text">Маркет</span>
+                </button>
+                <button class="nav-item" data-nav="trade">
+
+                    <span class="nav-icon">🔄</span>
+
+                    <span class="nav-text">Трейд</span>
+
+                </button>
+                <button class="nav-item active" data-nav="orders">
+                    <span class="nav-icon">🧾</span>
+                    <span class="nav-text">Ордеры</span>
+                </button>
+                <button class="nav-item" data-nav="history">
+                    <span class="nav-icon">🕘</span>
+                    <span class="nav-text">История</span>
+                </button>
+                <button class="nav-item" data-nav="storage">
+                    <span class="nav-icon">📦</span>
+                    <span class="nav-text">Хранилище</span>
+                </button>
+            </nav>
+        </div>
+    </div>
+
+    <!-- ЭКРАН 5: ХРАНИЛИЩЕ (товары пользователя, которые сейчас не выставлены
+         на продажу — попадают сюда после покупки или после снятия лота) -->
+    <div id="storageScreen" class="screen">
+        <header class="profile-header">
+            <button class="back-btn" id="backToProfileFromStorageBtn">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                Назад
+            </button>
+        </header>
+
+        <div class="profile-content">
+            <div class="section-title">ХРАНИЛИЩЕ</div>
+
+            <!-- Поиск и фильтры (аналогично Маркету) -->
+            <div class="filter-section">
+                <div class="search-box">
+                    <span class="search-icon">🔍</span>
+                    <input type="text" id="storageSearchInput" placeholder="Поиск по названию NFT">
+                </div>
+
+                <div class="filter-scroll">
+                    <button class="sort-trigger-btn" id="storageSortTriggerBtn">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M6 12h12M10 18h4"/></svg>
+                    </button>
+                    <button class="filter-pill" id="storageFilterNftBtn" data-filter-type="collection">NFT</button>
+                    <button class="filter-pill" id="storageFilterModelBtn" data-filter-type="model">Модель</button>
+                    <button class="filter-pill" id="storageFilterBgBtn" data-filter-type="backdrop">Фон</button>
+                    <button class="filter-pill" id="storageFilterSymbolBtn" data-filter-type="symbol">Символ</button>
+                </div>
+            </div>
+
+            <main class="market-grid" id="storageGrid">
+                <!-- Карточки генерируются через JS (см. loadInventory/renderStorageGrid в app.js) -->
+            </main>
+
+            <!-- Нижняя навигация -->
+            <nav class="bottom-nav">
+                <button class="nav-item" data-nav="market">
+                    <span class="nav-icon">🏪</span>
+                    <span class="nav-text">Маркет</span>
+                </button>
+                <button class="nav-item" data-nav="trade">
+
+                    <span class="nav-icon">🔄</span>
+
+                    <span class="nav-text">Трейд</span>
+
+                </button>
+                <button class="nav-item" data-nav="orders">
+                    <span class="nav-icon">🧾</span>
+                    <span class="nav-text">Ордеры</span>
+                </button>
+                <button class="nav-item" data-nav="history">
+                    <span class="nav-icon">🕘</span>
+                    <span class="nav-text">История</span>
+                </button>
+                <button class="nav-item active" data-nav="storage">
+                    <span class="nav-icon">📦</span>
+                    <span class="nav-text">Хранилище</span>
+                </button>
+            </nav>
+        </div>
+    </div>
+
+    <!-- ЭКРАН: ИГРА "СЛОТЫ" -->
+    <div id="slotsScreen" class="screen">
+        <header class="profile-header slots-header">
+            <button class="back-btn" id="backToProfileFromSlotsBtn">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                Назад
+            </button>
+            <button class="slots-rules-btn" id="openSlotsRulesBtn">
+                <span class="slots-rules-btn-icon">i</span>
+                Правила
+            </button>
+        </header>
+
+        <div class="slots-content">
+            <div class="slots-title">🎰 Слоты</div>
+
+            <div class="slots-balance-pill">
+                <span class="slots-balance-label">Баланс</span>
+                <span class="slots-balance-value"><span id="slotsBalanceValue" class="user-balance">0</span> 💎</span>
+            </div>
+
+            <div class="slots-machine">
+                <div class="slots-machine-lights">
+                    <span></span><span></span><span></span><span></span><span></span><span></span>
+                </div>
+                <div class="slots-reels">
+                    <div class="slot-reel-window">
+                        <div class="slot-reel-strip" id="slotReel0"></div>
+                    </div>
+                    <div class="slot-reel-window">
+                        <div class="slot-reel-strip" id="slotReel1"></div>
+                    </div>
+                    <div class="slot-reel-window">
+                        <div class="slot-reel-strip" id="slotReel2"></div>
+                    </div>
+                    <div class="slots-payline"></div>
+                </div>
+            </div>
+
+            <div class="slots-result" id="slotsResult">Крутите барабаны — удача любит смелых</div>
+
+            <div class="slots-bet-panel">
+                <div class="slots-bet-label">Ставка</div>
+                <div class="slots-bet-controls">
+                    <button class="slots-bet-step-btn" id="slotsBetMinusBtn" type="button">−</button>
+                    <div class="slots-bet-input-wrap">
+                        <input type="number" id="slotsBetInput" value="0.3" min="0.3" max="1000" step="0.1" inputmode="decimal">
+                        <span class="slots-bet-diamond">💎</span>
+                    </div>
+                    <button class="slots-bet-step-btn" id="slotsBetPlusBtn" type="button">+</button>
+                </div>
+                <div class="slots-bet-quick">
+                    <button class="slots-bet-quick-btn" data-bet-mode="min" type="button">MIN</button>
+                    <button class="slots-bet-quick-btn" data-bet-mode="half" type="button">1/2</button>
+                    <button class="slots-bet-quick-btn" data-bet-mode="double" type="button">x2</button>
+                    <button class="slots-bet-quick-btn" data-bet-mode="max" type="button">MAX</button>
+                </div>
+            </div>
+
+            <button class="slots-spin-btn" id="slotsSpinBtn" type="button">
+                <span class="slots-spin-btn-text">КРУТИТЬ</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- Модальное окно правил игры "Слоты" -->
+    <div id="slotsRulesModal" class="modal" style="display: none;">
+        <div class="modal-content slots-rules-content">
+            <button class="close-modal" id="closeSlotsRulesModal">&times;</button>
+            <h2>Правила игры</h2>
+            <p class="slots-rules-desc">Крутите барабаны — если на линии выпадут 3 одинаковых символа, выигрыш начисляется автоматически. Множитель зависит от символа:</p>
+
+            <div class="slots-rules-list">
+                <div class="slots-rules-row">
+                    <span class="slots-rules-icon">🍒</span>
+                    <span class="slots-rules-name">Вишни</span>
+                    <span class="slots-rules-mult">x3</span>
+                </div>
+                <div class="slots-rules-row">
+                    <span class="slots-rules-icon">🍋</span>
+                    <span class="slots-rules-name">Лимоны</span>
+                    <span class="slots-rules-mult">x3</span>
+                </div>
+                <div class="slots-rules-row">
+                    <span class="slots-rules-icon">7️⃣</span>
+                    <span class="slots-rules-name">777</span>
+                    <span class="slots-rules-mult">x5</span>
+                </div>
+                <div class="slots-rules-row is-top">
+                    <span class="slots-rules-icon">💎</span>
+                    <span class="slots-rules-name">Алмазы</span>
+                    <span class="slots-rules-mult">x7</span>
+                </div>
+            </div>
+
+            <div class="slots-rules-bets">
+                <div class="slots-rules-bet-item">
+                    <span>Мин. ставка</span>
+                    <b>0.3 💎</b>
+                </div>
+                <div class="slots-rules-bet-item">
+                    <span>Макс. ставка</span>
+                    <b>1 000 💎</b>
+                </div>
+            </div>
+
+            <button class="action-btn slots-rules-close-btn" id="closeSlotsRulesModalBtn">Понятно</button>
+        </div>
+    </div>
+
+    <!-- ЭКРАН: ИГРА "РУЛЕТКА" -->
+    <div id="rouletteScreen" class="screen">
+        <header class="profile-header slots-header">
+            <button class="back-btn" id="backToProfileFromRouletteBtn">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                Назад
+            </button>
+            <button class="slots-rules-btn" id="openRouletteRulesBtn">
+                <span class="slots-rules-btn-icon">i</span>
+                Правила
+            </button>
+        </header>
+
+        <div class="slots-content roulette-content">
+            <div class="slots-title">🎡 Рулетка</div>
+
+            <div class="slots-balance-pill">
+                <span class="slots-balance-label">Баланс</span>
+                <span class="slots-balance-value"><span id="rouletteBalanceValue" class="user-balance">0</span> 💎</span>
+            </div>
+
+            <div class="roulette-wheel-wrap">
+                <div class="roulette-pointer"></div>
+                <div class="roulette-wheel" id="rouletteWheel"></div>
+                <div class="roulette-wheel-hub">🎡</div>
+            </div>
+
+            <div class="roulette-legend">
+                <div class="roulette-legend-item"><span class="roulette-legend-dot" style="background:#3a3a3c"></span>0</div>
+                <div class="roulette-legend-item"><span class="roulette-legend-dot" style="background:#34c759"></span>x1.5</div>
+                <div class="roulette-legend-item"><span class="roulette-legend-dot" style="background:#0a84ff"></span>x2</div>
+                <div class="roulette-legend-item"><span class="roulette-legend-dot" style="background:#ffd700"></span>x3</div>
+                <div class="roulette-legend-item"><span class="roulette-legend-dot" style="background:#ff9f0a"></span>x5</div>
+                <div class="roulette-legend-item"><span class="roulette-legend-dot" style="background:#ff453a"></span>x10</div>
+            </div>
+
+            <div class="slots-result roulette-result" id="rouletteResult">Крутите колесо — удача любит смелых</div>
+
+            <div class="slots-bet-panel">
+                <div class="slots-bet-label">Ставка</div>
+                <div class="slots-bet-controls">
+                    <button class="slots-bet-step-btn" id="rouletteBetMinusBtn" type="button">−</button>
+                    <div class="slots-bet-input-wrap">
+                        <input type="number" id="rouletteBetInput" value="0.3" min="0.3" max="1000" step="0.1" inputmode="decimal">
+                        <span class="slots-bet-diamond">💎</span>
+                    </div>
+                    <button class="slots-bet-step-btn" id="rouletteBetPlusBtn" type="button">+</button>
+                </div>
+                <div class="slots-bet-quick">
+                    <button class="slots-bet-quick-btn roulette-bet-quick-btn" data-bet-mode="min" type="button">MIN</button>
+                    <button class="slots-bet-quick-btn roulette-bet-quick-btn" data-bet-mode="half" type="button">1/2</button>
+                    <button class="slots-bet-quick-btn roulette-bet-quick-btn" data-bet-mode="double" type="button">x2</button>
+                    <button class="slots-bet-quick-btn roulette-bet-quick-btn" data-bet-mode="max" type="button">MAX</button>
+                </div>
+            </div>
+
+            <button class="slots-spin-btn roulette-spin-btn" id="rouletteSpinBtn" type="button">
+                <span class="slots-spin-btn-text roulette-spin-btn-text">КРУТИТЬ</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- Модальное окно правил игры "Рулетка" -->
+    <div id="rouletteRulesModal" class="modal" style="display: none;">
+        <div class="modal-content slots-rules-content">
+            <button class="close-modal" id="closeRouletteRulesModal">&times;</button>
+            <h2>Правила игры</h2>
+            <p class="slots-rules-desc">Крутите колесо — куда укажет стрелка, такой множитель и применяется к ставке. Чем больше множитель, тем меньше его территория на колесе:</p>
+
+            <div class="slots-rules-list">
+                <div class="slots-rules-row">
+                    <span class="roulette-legend-dot" style="background:#3a3a3c"></span>
+                    <span class="slots-rules-name">Мимо</span>
+                    <span class="slots-rules-mult">x0</span>
+                </div>
+                <div class="slots-rules-row">
+                    <span class="roulette-legend-dot" style="background:#34c759"></span>
+                    <span class="slots-rules-name">Зелёный</span>
+                    <span class="slots-rules-mult">x1.5</span>
+                </div>
+                <div class="slots-rules-row">
+                    <span class="roulette-legend-dot" style="background:#0a84ff"></span>
+                    <span class="slots-rules-name">Синий</span>
+                    <span class="slots-rules-mult">x2</span>
+                </div>
+                <div class="slots-rules-row">
+                    <span class="roulette-legend-dot" style="background:#ffd700"></span>
+                    <span class="slots-rules-name">Золотой</span>
+                    <span class="slots-rules-mult">x3</span>
+                </div>
+                <div class="slots-rules-row">
+                    <span class="roulette-legend-dot" style="background:#ff9f0a"></span>
+                    <span class="slots-rules-name">Оранжевый</span>
+                    <span class="slots-rules-mult">x5</span>
+                </div>
+                <div class="slots-rules-row is-top">
+                    <span class="roulette-legend-dot" style="background:#ff453a"></span>
+                    <span class="slots-rules-name">Красный</span>
+                    <span class="slots-rules-mult">x10</span>
+                </div>
+            </div>
+
+            <div class="slots-rules-bets">
+                <div class="slots-rules-bet-item">
+                    <span>Мин. ставка</span>
+                    <b>0.3 💎</b>
+                </div>
+                <div class="slots-rules-bet-item">
+                    <span>Макс. ставка</span>
+                    <b>1 000 💎</b>
+                </div>
+            </div>
+
+            <button class="action-btn slots-rules-close-btn" id="closeRouletteRulesModalBtn">Понятно</button>
+        </div>
+    </div>
+
+    <!-- ЭКРАН: ИГРА "БОМБЕР" (мины, поле 5x5) -->
+    <div id="bomberScreen" class="screen">
+        <header class="profile-header slots-header">
+            <button class="back-btn" id="backToProfileFromBomberBtn">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                Назад
+            </button>
+            <button class="slots-rules-btn" id="openBomberRulesBtn">
+                <span class="slots-rules-btn-icon">i</span>
+                Правила
+            </button>
+        </header>
+
+        <div class="slots-content bomber-content">
+            <div class="slots-title">💣 Бомбер</div>
+
+            <div class="slots-balance-pill">
+                <span class="slots-balance-label">Баланс</span>
+                <span class="slots-balance-value"><span id="bomberBalanceValue" class="user-balance">0</span> 💎</span>
+            </div>
+
+            <!-- Выбор количества бомб — доступно только до старта раунда -->
+            <div class="bomber-bombs-panel">
+                <div class="bomber-bombs-label">Количество бомб</div>
+                <div class="bomber-bombs-options" id="bomberBombsOptions">
+                    <button class="bomber-bombs-btn" data-bombs="4" type="button">4</button>
+                    <button class="bomber-bombs-btn is-active" data-bombs="6" type="button">6</button>
+                    <button class="bomber-bombs-btn" data-bombs="8" type="button">8</button>
+                </div>
+            </div>
+
+            <!-- Текущий множитель / потенциальный выигрыш -->
+            <div class="bomber-stats-row">
+                <div class="bomber-stat-box">
+                    <span class="bomber-stat-label">Множитель</span>
+                    <span class="bomber-stat-value" id="bomberMultiplierValue">x1.00</span>
+                </div>
+                <div class="bomber-stat-box">
+                    <span class="bomber-stat-label">Выигрыш</span>
+                    <span class="bomber-stat-value" id="bomberPotentialWinValue">0.00 💎</span>
+                </div>
+                <div class="bomber-stat-box">
+                    <span class="bomber-stat-label">Следующая</span>
+                    <span class="bomber-stat-value" id="bomberNextMultiplierValue">—</span>
+                </div>
+            </div>
+
+            <!-- Поле 7x7 -->
+            <div class="bomber-field" id="bomberField"></div>
+
+            <div class="slots-result" id="bomberResult">Выберите количество бомб, сделайте ставку и нажмите «Начать игру»</div>
+
+            <div class="slots-bet-panel" id="bomberBetPanel">
+                <div class="slots-bet-label">Ставка</div>
+                <div class="slots-bet-controls">
+                    <button class="slots-bet-step-btn" id="bomberBetMinusBtn" type="button">−</button>
+                    <div class="slots-bet-input-wrap">
+                        <input type="number" id="bomberBetInput" value="0.3" min="0.3" max="1000" step="0.1" inputmode="decimal">
+                        <span class="slots-bet-diamond">💎</span>
+                    </div>
+                    <button class="slots-bet-step-btn" id="bomberBetPlusBtn" type="button">+</button>
+                </div>
+                <div class="slots-bet-quick">
+                    <button class="slots-bet-quick-btn bomber-bet-quick-btn" data-bet-mode="min" type="button">MIN</button>
+                    <button class="slots-bet-quick-btn bomber-bet-quick-btn" data-bet-mode="half" type="button">1/2</button>
+                    <button class="slots-bet-quick-btn bomber-bet-quick-btn" data-bet-mode="double" type="button">x2</button>
+                    <button class="slots-bet-quick-btn bomber-bet-quick-btn" data-bet-mode="max" type="button">MAX</button>
+                </div>
+            </div>
+
+            <div class="bomber-actions">
+                <button class="slots-spin-btn bomber-start-btn" id="bomberStartBtn" type="button">
+                    <span class="slots-spin-btn-text">НАЧАТЬ ИГРУ</span>
+                </button>
+                <button class="slots-spin-btn bomber-cashout-btn" id="bomberCashoutBtn" type="button" style="display:none;">
+                    <span class="slots-spin-btn-text">ЗАБРАТЬ ВЫИГРЫШ</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Модальное окно правил игры "Бомбер" -->
+    <div id="bomberRulesModal" class="modal" style="display: none;">
+        <div class="modal-content slots-rules-content">
+            <button class="close-modal" id="closeBomberRulesModal">&times;</button>
+            <h2>Правила игры «Бомбер»</h2>
+            <p class="slots-rules-desc">
+                Поле — 5×5 (25 ячеек). Перед стартом выберите количество бомб (4, 6 или 8)
+                и сделайте ставку, затем нажмите «Начать игру» — бомбы будут расставлены случайно
+                и скрыты от вас.
+            </p>
+            <p class="slots-rules-desc">
+                Открывайте ячейки по одной. Каждая безопасная ячейка увеличивает множитель
+                выигрыша — чем больше бомб выбрано и чем больше ячеек открыто, тем выше
+                множитель и тем выше риск. В любой момент после первой открытой ячейки можно
+                нажать «Забрать выигрыш» — ставка × текущий множитель зачислится на баланс.
+            </p>
+            <p class="slots-rules-desc">
+                Если открыта ячейка с бомбой — раунд проигран, ставка сгорает, и открываются
+                все бомбы на поле. Если открыты все безопасные ячейки без единого подрыва —
+                выигрыш засчитывается автоматически по максимальному множителю раунда.
+            </p>
+
+            <div class="bomber-rules-table">
+                <div class="bomber-rules-row bomber-rules-head">
+                    <span>Бомб</span>
+                    <span>Безопасных ячеек</span>
+                    <span>Риск</span>
+                </div>
+                <div class="bomber-rules-row">
+                    <span>4</span><span>21 из 25</span><span class="bomber-risk-low">Низкий</span>
+                </div>
+                <div class="bomber-rules-row">
+                    <span>6</span><span>19 из 25</span><span class="bomber-risk-mid">Средний</span>
+                </div>
+                <div class="bomber-rules-row">
+                    <span>8</span><span>17 из 25</span><span class="bomber-risk-high">Высокий</span>
+                </div>
+            </div>
+
+            <div class="slots-rules-bets">
+                <div class="slots-rules-bet-item">
+                    <span>Мин. ставка</span>
+                    <b>0.3 💎</b>
+                </div>
+                <div class="slots-rules-bet-item">
+                    <span>Макс. ставка</span>
+                    <b>1 000 💎</b>
+                </div>
+            </div>
+
+            <button class="action-btn slots-rules-close-btn" id="closeBomberRulesModalBtn">Понятно</button>
+        </div>
+    </div>
+
+    <!-- ЭКРАН: ИГРА "БАШНЯ" (подъём по этажам, чем выше — тем больше множитель и риск) -->
+    <div id="towerScreen" class="screen">
+        <header class="profile-header slots-header">
+            <button class="back-btn" id="backToProfileFromTowerBtn">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                Назад
+            </button>
+            <button class="slots-rules-btn" id="openTowerRulesBtn">
+                <span class="slots-rules-btn-icon">i</span>
+                Правила
+            </button>
+        </header>
+
+        <div class="slots-content tower-content">
+            <div class="slots-title">🗼 Башня</div>
+
+            <div class="slots-balance-pill">
+                <span class="slots-balance-label">Баланс</span>
+                <span class="slots-balance-value"><span id="towerBalanceValue" class="user-balance">0</span> 💎</span>
+            </div>
+
+            <!-- Фиксированная конфигурация этажей — сложность нарастает по мере подъёма -->
+
+            <!-- Текущий множитель / потенциальный выигрыш -->
+            <div class="bomber-stats-row tower-stats-row">
+                <div class="bomber-stat-box">
+                    <span class="bomber-stat-label">Этаж</span>
+                    <span class="bomber-stat-value" id="towerFloorValue">0 / 8</span>
+                </div>
+                <div class="bomber-stat-box">
+                    <span class="bomber-stat-label">Выигрыш</span>
+                    <span class="bomber-stat-value" id="towerPotentialWinValue">0.00 💎</span>
+                </div>
+                <div class="bomber-stat-box">
+                    <span class="bomber-stat-label">Следующий</span>
+                    <span class="bomber-stat-value" id="towerNextMultiplierValue">—</span>
+                </div>
+            </div>
+
+            <!-- Башня: этажи снизу вверх, текущий этаж активен -->
+            <div class="tower-field" id="towerField"></div>
+
+            <div class="slots-result" id="towerResult">Выберите сложность, сделайте ставку и нажмите «Начать подъём»</div>
+
+            <div class="slots-bet-panel" id="towerBetPanel">
+                <div class="slots-bet-label">Ставка</div>
+                <div class="slots-bet-controls">
+                    <button class="slots-bet-step-btn" id="towerBetMinusBtn" type="button">−</button>
+                    <div class="slots-bet-input-wrap">
+                        <input type="number" id="towerBetInput" value="0.3" min="0.3" max="1000" step="0.1" inputmode="decimal">
+                        <span class="slots-bet-diamond">💎</span>
+                    </div>
+                    <button class="slots-bet-step-btn" id="towerBetPlusBtn" type="button">+</button>
+                </div>
+                <div class="slots-bet-quick">
+                    <button class="slots-bet-quick-btn tower-bet-quick-btn" data-bet-mode="min" type="button">MIN</button>
+                    <button class="slots-bet-quick-btn tower-bet-quick-btn" data-bet-mode="half" type="button">1/2</button>
+                    <button class="slots-bet-quick-btn tower-bet-quick-btn" data-bet-mode="double" type="button">x2</button>
+                    <button class="slots-bet-quick-btn tower-bet-quick-btn" data-bet-mode="max" type="button">MAX</button>
+                </div>
+            </div>
+
+            <div class="bomber-actions tower-actions">
+                <button class="slots-spin-btn tower-start-btn" id="towerStartBtn" type="button">
+                    <span class="slots-spin-btn-text">НАЧАТЬ ПОДЪЁМ</span>
+                </button>
+                <button class="slots-spin-btn bomber-cashout-btn tower-cashout-btn" id="towerCashoutBtn" type="button" style="display:none;">
+                    <span class="slots-spin-btn-text">ЗАБРАТЬ ВЫИГРЫШ</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Модальное окно правил игры "Башня" -->
+    <div id="towerRulesModal" class="modal" style="display: none;">
+        <div class="modal-content slots-rules-content">
+            <button class="close-modal" id="closeTowerRulesModal">&times;</button>
+            <h2>Правила игры «Башня»</h2>
+            <p class="slots-rules-desc">
+                Башня состоит из 5 этажей с фиксированной конфигурацией — сделайте
+                ставку и нажмите «Начать подъём». На каждом этаже ловушки
+                расставляются случайно и скрыты от вас.
+            </p>
+            <p class="slots-rules-desc">
+                На текущем этаже выберите одну из плиток. Если плитка безопасна — вы
+                поднимаетесь на этаж выше, а множитель выигрыша растёт. Чем выше
+                поднимаетесь — тем больше множитель и тем выше риск. В любой момент
+                после подъёма на первый этаж можно нажать «Забрать выигрыш» — ставка
+                × текущий множитель зачислится на баланс.
+            </p>
+            <p class="slots-rules-desc">
+                Если выбрана плитка с ловушкой — раунд проигран, ставка сгорает.
+                Если пройдены все 5 этажей — выигрыш засчитывается автоматически
+                по максимальному множителю раунда.
+            </p>
+
+            <div class="bomber-rules-table">
+                <div class="bomber-rules-row bomber-rules-head">
+                    <span>Этаж</span>
+                    <span>Плиток / ловушек</span>
+                    <span>Шанс пройти</span>
+                </div>
+                <div class="bomber-rules-row">
+                    <span>1</span><span>6 плиток, 3 ловушки</span><span class="bomber-risk-mid">50%</span>
+                </div>
+                <div class="bomber-rules-row">
+                    <span>2</span><span>5 плиток, 3 ловушки</span><span class="bomber-risk-high">40%</span>
+                </div>
+                <div class="bomber-rules-row">
+                    <span>3</span><span>4 плитки, 2 ловушки</span><span class="bomber-risk-mid">50%</span>
+                </div>
+                <div class="bomber-rules-row">
+                    <span>4</span><span>3 плитки, 2 ловушки</span><span class="bomber-risk-high">≈33%</span>
+                </div>
+                <div class="bomber-rules-row">
+                    <span>5</span><span>2 плитки, 1 ловушка</span><span class="bomber-risk-mid">50%</span>
+                </div>
+            </div>
+
+            <div class="slots-rules-bets">
+                <div class="slots-rules-bet-item">
+                    <span>Мин. ставка</span>
+                    <b>0.3 💎</b>
+                </div>
+                <div class="slots-rules-bet-item">
+                    <span>Макс. ставка</span>
+                    <b>1 000 💎</b>
+                </div>
+            </div>
+
+            <button class="action-btn slots-rules-close-btn" id="closeTowerRulesModalBtn">Понятно</button>
+        </div>
+    </div>
+
+    <!-- ЭКРАН: ИГРА "КОСТИ" (обычный кубик 1-6, ставка на одно число, x3) -->
+    <div id="diceScreen" class="screen">
+        <header class="profile-header slots-header">
+            <button class="back-btn" id="backToProfileFromDiceBtn">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                Назад
+            </button>
+            <button class="slots-rules-btn" id="openDiceRulesBtn">
+                <span class="slots-rules-btn-icon">i</span>
+                Правила
+            </button>
+        </header>
+
+        <div class="slots-content dice-content">
+            <div class="slots-title">🎲 Кости</div>
+
+            <div class="slots-balance-pill">
+                <span class="slots-balance-label">Баланс</span>
+                <span class="slots-balance-value"><span id="diceBalanceValue" class="user-balance">0</span> 💎</span>
+            </div>
+
+            <!-- Кубик с анимацией броска -->
+            <div class="dice-cube-wrap">
+                <div class="dice-cube" id="diceCube">
+                    <span class="dice-pip"></span><span class="dice-pip"></span><span class="dice-pip"></span>
+                    <span class="dice-pip"></span><span class="dice-pip"></span><span class="dice-pip"></span>
+                    <span class="dice-pip"></span><span class="dice-pip"></span><span class="dice-pip"></span>
+                </div>
+            </div>
+
+            <!-- Выбор числа, на которое ставим -->
+            <div class="dice-numbers-panel">
+                <div class="dice-numbers-label">Ваше число</div>
+                <div class="dice-numbers-options" id="diceNumbersOptions">
+                    <button class="dice-number-btn is-active" data-number="1" type="button">1</button>
+                    <button class="dice-number-btn" data-number="2" type="button">2</button>
+                    <button class="dice-number-btn" data-number="3" type="button">3</button>
+                    <button class="dice-number-btn" data-number="4" type="button">4</button>
+                    <button class="dice-number-btn" data-number="5" type="button">5</button>
+                    <button class="dice-number-btn" data-number="6" type="button">6</button>
+                </div>
+            </div>
+
+            <div class="bomber-stats-row dice-stats-row">
+                <div class="bomber-stat-box">
+                    <span class="bomber-stat-label">Выплата</span>
+                    <span class="bomber-stat-value">x3</span>
+                </div>
+                <div class="bomber-stat-box">
+                    <span class="bomber-stat-label">Выигрыш</span>
+                    <span class="bomber-stat-value" id="dicePotentialWinValue">0.90 💎</span>
+                </div>
+            </div>
+
+            <div class="slots-result" id="diceResult">Выберите число, сделайте ставку и нажмите «Бросить кубик»</div>
+
+            <div class="slots-bet-panel">
+                <div class="slots-bet-label">Ставка</div>
+                <div class="slots-bet-controls">
+                    <button class="slots-bet-step-btn" id="diceBetMinusBtn" type="button">−</button>
+                    <div class="slots-bet-input-wrap">
+                        <input type="number" id="diceBetInput" value="0.3" min="0.3" max="1000" step="0.1" inputmode="decimal">
+                        <span class="slots-bet-diamond">💎</span>
+                    </div>
+                    <button class="slots-bet-step-btn" id="diceBetPlusBtn" type="button">+</button>
+                </div>
+                <div class="slots-bet-quick">
+                    <button class="slots-bet-quick-btn dice-bet-quick-btn" data-bet-mode="min" type="button">MIN</button>
+                    <button class="slots-bet-quick-btn dice-bet-quick-btn" data-bet-mode="half" type="button">1/2</button>
+                    <button class="slots-bet-quick-btn dice-bet-quick-btn" data-bet-mode="double" type="button">x2</button>
+                    <button class="slots-bet-quick-btn dice-bet-quick-btn" data-bet-mode="max" type="button">MAX</button>
+                </div>
+            </div>
+
+            <button class="slots-spin-btn dice-roll-btn" id="diceRollBtn" type="button">
+                <span class="slots-spin-btn-text">БРОСИТЬ КУБИК</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- Модальное окно правил игры "Кости" -->
+    <div id="diceRulesModal" class="modal" style="display: none;">
+        <div class="modal-content slots-rules-content">
+            <button class="close-modal" id="closeDiceRulesModal">&times;</button>
+            <h2>Правила игры «Кости»</h2>
+            <p class="slots-rules-desc">
+                Обычный игральный кубик с гранями от 1 до 6. Выберите одно число, на которое
+                ставите, сделайте ставку и нажмите «Бросить кубик» — сервер честно бросит
+                кубик и определит результат.
+            </p>
+            <p class="slots-rules-desc">
+                Если выпавшее число совпало с вашим — вы выигрываете <b>×3</b> от ставки.
+                Если нет — ставка сгорает. Ставить можно только на одно число за раз.
+            </p>
+
+            <div class="slots-rules-bets">
+                <div class="slots-rules-bet-item">
+                    <span>Мин. ставка</span>
+                    <b>0.3 💎</b>
+                </div>
+                <div class="slots-rules-bet-item">
+                    <span>Макс. ставка</span>
+                    <b>1 000 💎</b>
+                </div>
+            </div>
+
+            <button class="action-btn slots-rules-close-btn" id="closeDiceRulesModalBtn">Понятно</button>
+        </div>
+    </div>
+
+    <!-- ЭКРАН: ИГРА "ПЛИНКО" (шарик через колышки, 9 корзин с множителями) -->
+    <div id="plinkoScreen" class="screen">
+        <header class="profile-header slots-header">
+            <button class="back-btn" id="backToProfileFromPlinkoBtn">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                Назад
+            </button>
+            <button class="slots-rules-btn" id="openPlinkoRulesBtn">
+                <span class="slots-rules-btn-icon">i</span>
+                Правила
+            </button>
+        </header>
+
+        <div class="slots-content plinko-content">
+            <div class="slots-title">🎯 Плинко</div>
+
+            <div class="slots-balance-pill">
+                <span class="slots-balance-label">Баланс</span>
+                <span class="slots-balance-value"><span id="plinkoBalanceValue" class="user-balance">0</span> 💎</span>
+            </div>
+
+            <!-- Доска с колышками, шариком и корзинами множителей -->
+            <div class="plinko-board-wrap">
+                <div class="plinko-launcher" id="plinkoLauncher">
+                    <div class="plinko-launcher-arrow"></div>
+                    <div class="plinko-launcher-ball"></div>
+                </div>
+                <div class="plinko-board" id="plinkoBoard">
+                    <div class="plinko-pegs-layer" id="plinkoPegsLayer"></div>
+                    <div class="plinko-ball" id="plinkoBall" style="display:none;"></div>
+                </div>
+                <div class="plinko-bins" id="plinkoBins"></div>
+            </div>
+
+            <div class="slots-result" id="plinkoResult">Сделайте ставку и нажмите «Бросить шарик»</div>
+
+            <div class="slots-bet-panel">
+                <div class="slots-bet-label">Ставка</div>
+                <div class="slots-bet-controls">
+                    <button class="slots-bet-step-btn" id="plinkoBetMinusBtn" type="button">−</button>
+                    <div class="slots-bet-input-wrap">
+                        <input type="number" id="plinkoBetInput" value="0.3" min="0.3" max="1000" step="0.1" inputmode="decimal">
+                        <span class="slots-bet-diamond">💎</span>
+                    </div>
+                    <button class="slots-bet-step-btn" id="plinkoBetPlusBtn" type="button">+</button>
+                </div>
+                <div class="slots-bet-quick">
+                    <button class="slots-bet-quick-btn plinko-bet-quick-btn" data-bet-mode="min" type="button">MIN</button>
+                    <button class="slots-bet-quick-btn plinko-bet-quick-btn" data-bet-mode="half" type="button">1/2</button>
+                    <button class="slots-bet-quick-btn plinko-bet-quick-btn" data-bet-mode="double" type="button">x2</button>
+                    <button class="slots-bet-quick-btn plinko-bet-quick-btn" data-bet-mode="max" type="button">MAX</button>
+                </div>
+            </div>
+
+            <button class="slots-spin-btn plinko-drop-btn" id="plinkoDropBtn" type="button">
+                <span class="slots-spin-btn-text">БРОСИТЬ ШАРИК</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- Модальное окно правил игры "Плинко" -->
+    <div id="plinkoRulesModal" class="modal" style="display: none;">
+        <div class="modal-content slots-rules-content">
+            <button class="close-modal" id="closePlinkoRulesModal">&times;</button>
+            <h2>Правила игры «Плинко»</h2>
+            <p class="slots-rules-desc">
+                Сделайте ставку и уроните шарик. Он падает через 16 рядов колышков
+                и попадает в одну из 17 корзин внизу — у каждой свой множитель,
+                таблица фиксирована и одинакова для всех.
+            </p>
+            <p class="slots-rules-desc">
+                Выигрыш = ставка × множитель корзины, в которую попал шарик. Крайние
+                корзины дают самый большой множитель (x5, x10), но шанс попасть
+                в них ниже всего.
+            </p>
+
+            <div class="plinko-rules-mults">
+                <span class="plinko-bin plinko-bin-extreme">x10</span>
+                <span class="plinko-bin plinko-bin-extreme">x5</span>
+                <span class="plinko-bin plinko-bin-high">x3</span>
+                <span class="plinko-bin plinko-bin-high">x2.5</span>
+                <span class="plinko-bin plinko-bin-high">x2</span>
+                <span class="plinko-bin plinko-bin-mid">x1.5</span>
+                <span class="plinko-bin plinko-bin-mid">x1.3</span>
+                <span class="plinko-bin plinko-bin-mid">x1.2</span>
+                <span class="plinko-bin plinko-bin-low">x0</span>
+            </div>
+
+            <div class="slots-rules-bets">
+                <div class="slots-rules-bet-item">
+                    <span>Мин. ставка</span>
+                    <b>0.3 💎</b>
+                </div>
+                <div class="slots-rules-bet-item">
+                    <span>Макс. ставка</span>
+                    <b>1 000 💎</b>
+                </div>
+            </div>
+
+            <button class="action-btn slots-rules-close-btn" id="closePlinkoRulesModalBtn">Понятно</button>
+        </div>
+    </div>
+
+    <!-- ЭКРАН 6: ТРЕЙД (P2P-обмен подарками между пользователями) -->
+    <div id="tradeScreen" class="screen">
+        <header class="profile-header">
+            <button class="back-btn" id="backToProfileFromTradeBtn">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+                Назад
+            </button>
+        </header>
+
+        <div class="profile-content">
+            <div class="section-title">ТРЕЙД — ОБМЕН ПОДАРКАМИ</div>
+
+            <div class="orders-tabs" id="tradeTabs">
+                <button class="orders-tab active" data-trade-tab="new">Новый</button>
+                <button class="orders-tab" data-trade-tab="incoming">Входящие</button>
+                <button class="orders-tab" data-trade-tab="mine">Мои обмены</button>
+            </div>
+
+            <!-- Вкладка: новый обмен -->
+            <div id="tradeNewPanel" class="trade-panel">
+                <div class="trade-search-row">
+                    <input type="text" id="tradeRecipientInput" placeholder="Username получателя, например durov">
+                    <button class="action-btn trade-find-btn" id="tradeFindUserBtn">Найти</button>
+                </div>
+                <div id="tradeFoundUsers" class="trade-found-list"></div>
+
+                <div id="tradeSelectionArea" style="display:none;">
+                    <div class="trade-selected-user" id="tradeSelectedUserBox"></div>
+
+                    <div class="section-title trade-subtitle">ВАШИ ПРЕДМЕТЫ</div>
+                    <ul class="history-list trade-pick-list" id="tradeMyItemsList"></ul>
+
+                    <div class="section-title trade-subtitle" id="tradeTheirItemsTitle">ПРЕДМЕТЫ ПОЛУЧАТЕЛЯ</div>
+                    <ul class="history-list trade-pick-list" id="tradeTheirItemsList"></ul>
+
+                    <div class="section-title trade-subtitle">ДОПЛАТА TON (НЕОБЯЗАТЕЛЬНО)</div>
+                    <div class="trade-topup-row">
+                        <div class="trade-topup-direction" id="tradeTopupDirection">
+                            <button type="button" class="trade-topup-dir-btn active" data-topup-payer="none">Без доплаты</button>
+                            <button type="button" class="trade-topup-dir-btn" data-topup-payer="initiator">Я доплачиваю</button>
+                            <button type="button" class="trade-topup-dir-btn" data-topup-payer="recipient">Прошу доплату</button>
+                        </div>
+                        <input type="number" id="tradeTopupAmount" placeholder="0.0" min="0.1" step="0.1" style="display:none;">
+                    </div>
+                    <div class="trade-fee-note">Комиссия площадки за трейд: 0.05 TON (спишется с вас сейчас, вернётся, если обмен не состоится)</div>
+
+                    <button class="action-btn" id="tradeSubmitBtn">Предложить обмен</button>
+                </div>
+            </div>
+
+            <!-- Вкладка: входящие предложения -->
+            <ul class="history-list trade-panel" id="tradeIncomingList" style="display:none;"></ul>
+
+            <!-- Вкладка: мои обмены (исходящие + история) -->
+            <ul class="history-list trade-panel" id="tradeMineList" style="display:none;"></ul>
+
+            <!-- Нижняя навигация -->
+            <nav class="bottom-nav">
+                <button class="nav-item" data-nav="market">
+                    <span class="nav-icon">🏪</span>
+                    <span class="nav-text">Маркет</span>
+                </button>
+                <button class="nav-item active" data-nav="trade">
+                    <span class="nav-icon">🔄</span>
+                    <span class="nav-text">Трейд</span>
+                </button>
+                <button class="nav-item" data-nav="orders">
+                    <span class="nav-icon">🧾</span>
+                    <span class="nav-text">Ордеры</span>
+                </button>
+                <button class="nav-item" data-nav="history">
+                    <span class="nav-icon">🕘</span>
+                    <span class="nav-text">История</span>
+                </button>
+                <button class="nav-item" data-nav="storage">
+                    <span class="nav-icon">📦</span>
+                    <span class="nav-text">Хранилище</span>
+                </button>
+            </nav>
+        </div>
+    </div>
+
+    <!-- Модальное окно детального просмотра трейда (обе стороны обмена + кнопки
+         Принять/Отклонить для входящих, Отменить для своих исходящих) -->
+    <div id="tradeDetailModal" class="modal" style="display: none;">
+        <div class="modal-content listing-form">
+            <button class="close-modal" id="closeTradeDetailModal">&times;</button>
+            <h2>Обмен</h2>
+
+            <div class="trade-detail-meta" id="tradeDetailMeta"></div>
+
+            <div class="trade-topup-note" id="tradeDetailTopupNote" style="display:none;"></div>
+
+            <div class="section-title trade-subtitle" id="tradeDetailGiveTitle">ВЫ ОТДАЁТЕ</div>
+            <ul class="history-list" id="tradeDetailGiveList"></ul>
+
+            <div class="section-title trade-subtitle" id="tradeDetailGetTitle">ВЫ ПОЛУЧАЕТЕ</div>
+            <ul class="history-list" id="tradeDetailGetList"></ul>
+
+            <div class="trade-detail-actions" id="tradeDetailActions"></div>
+        </div>
+    </div>
+
+    <!-- Модальное окно выставления товара из "Хранилища" обратно на продажу
+         (открывается по кнопке "Выставить на продажу" на карточке товара) —
+         оформлена так же, как карточка покупки: картинка + трейты + поле цены. -->
+    <div id="relistModal" class="modal" style="display: none;">
+        <div class="modal-content listing-detail-content">
+            <button class="close-modal listing-detail-close" id="closeRelistModal">&times;</button>
+
+            <div class="listing-detail-image-wrap" id="relistImageWrap">
+                <img id="relistImage" class="listing-detail-image" src="" alt="">
+            </div>
+            <div class="listing-detail-title" id="relistTitle"></div>
+            <div class="listing-detail-number" id="relistNumber"></div>
+
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Коллекция</span>
+                <span class="listing-detail-value" id="relistCollection"></span>
+            </div>
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Модель</span>
+                <span class="listing-detail-value" id="relistModel"></span>
+            </div>
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Фон</span>
+                <span class="listing-detail-value" id="relistBackdrop"></span>
+            </div>
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Символ</span>
+                <span class="listing-detail-value" id="relistSymbol"></span>
+            </div>
+
+            <div class="withdraw-input-box">
+                <input type="number" id="relistPrice" placeholder="Цена 💎" min="0.01" step="0.01">
+            </div>
+            <div class="listing-fee-note">Комиссия маркетплейса при продаже: 1.5%</div>
+
+            <button class="action-btn listing-detail-buy quick-order-confirm-btn" id="relistConfirmBtn">Выставить на продажу</button>
+        </div>
+    </div>
+
+    <!-- Модальное окно подключения кошелька -->
+    <div class="wallet-modal" id="walletModal">
+    <div class="wallet-modal-content">
+        <button class="close-modal-btn" id="closeWalletModal">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+
+        <div class="wallet-modal-header">
+            <h2>Connect your TON wallet</h2>
+            <p>Use Wallet in Telegram or choose other application</p>
+        </div>
+
+        <button class="connect-tg-btn">
+            <span class="wallet-icon-left">👛</span>
+            <span>Connect Wallet in Telegram</span>
+            <span class="tg-icon-right">✈️</span>
+        </button>
+
+        <div class="other-apps-title">Choose other application</div>
+
+        <div class="wallets-grid">
+            <div class="wallet-item">
+                <div class="wallet-app-icon tonkeeper">💎</div>
+                <span>Tonkeeper</span>
+            </div>
+            <div class="wallet-item">
+                <div class="wallet-app-icon gram">💠</div>
+                <span>Gram Wallet</span>
+            </div>
+            <div class="wallet-item">
+                <div class="wallet-app-icon mywallet">📈</div>
+                <span>My Wallet</span>
+            </div>
+            <div class="wallet-item">
+                <div class="wallet-app-icon view-all">🧩</div>
+                <span>View all wallets</span>
+            </div>
+        </div>
+
+        <div class="ton-connect-footer">
+            <span>💎 TON Connect</span>
+            <span class="help-icon">?</span>
+        </div>
+    </div>
+</div>
+
+ <!-- Модальное окно вывода средств -->
+    <div class="modal" id="withdrawModal" style="display: none;">
+        <div class="modal-content">
+            <button class="close-modal" id="closeWithdrawModal">&times;</button>
+
+            <h2>Вывод средств</h2>
+
+            <!-- Поле ввода суммы -->
+            <div class="withdraw-input-box">
+                <input type="number" id="withdrawAmount" placeholder="Сумма (0.5 - 100000)" step="0.1" min="0.5" max="100000">
+            </div>
+
+            <!-- Кнопка подтверждения вывода -->
+            <button class="action-btn" id="confirmWithdrawBtn">Вывести</button>
+        </div>
+    </div>
+       <div id="depositModal" class="modal" style="display: none;">
+    <div class="modal-content">
+        <button class="close-modal" id="closeDepositModal" onclick="document.getElementById('depositModal').style.display='none'">&times;</button>
+        <h2>Пополнение баланса</h2>
+        <div class="withdraw-input-box">
+            <input type="number" id="depositAmount" placeholder="Сумма (0.1 - 100000)" step="0.1" min="0.1" max="100000">
+        </div>
+        <button class="action-btn" id="confirmDepositBtn">Пополнить</button>
+    </div>
+</div>
+
+    <!-- Модальное окно выставления NFT на продажу -->
+    <div id="createListingModal" class="modal" style="display: none;">
+        <div class="modal-content listing-form">
+            <button class="close-modal" id="closeCreateListingModal">&times;</button>
+            <h2>Добавить NFT</h2>
+
+            <label class="listing-field-label">Коллекция</label>
+            <select id="listingCollectionSelect" class="dropdown-filter listing-select">
+                <option value="">Выберите коллекцию</option>
+            </select>
+
+            <label class="listing-field-label">Модель</label>
+            <select id="listingModelSelect" class="dropdown-filter listing-select" disabled>
+                <option value="">Сначала выберите коллекцию</option>
+            </select>
+
+            <label class="listing-field-label">Фон</label>
+            <select id="listingBackdropSelect" class="dropdown-filter listing-select" disabled>
+                <option value="">Сначала выберите коллекцию</option>
+            </select>
+
+            <label class="listing-field-label">Символ</label>
+            <select id="listingSymbolSelect" class="dropdown-filter listing-select" disabled>
+                <option value="">Сначала выберите коллекцию</option>
+            </select>
+
+            <div class="withdraw-input-box">
+                <input type="number" id="listingGiftNumber" placeholder="Номер подарка (напр. 56824)" min="1" step="1">
+            </div>
+
+            <button class="action-btn" id="confirmCreateListingBtn">Добавить</button>
+        </div>
+    </div>
+
+    <!-- Модальное окно создания ордера на покупку -->
+    <div id="createOrderModal" class="modal" style="display: none;">
+        <div class="modal-content listing-form">
+            <button class="close-modal" id="closeCreateOrderModal">&times;</button>
+            <h2>Создать ордер</h2>
+
+            <label class="listing-field-label">Коллекция</label>
+            <select id="orderCollectionSelect" class="dropdown-filter listing-select">
+                <option value="">Выберите коллекцию</option>
+            </select>
+
+            <label class="listing-field-label">Модель</label>
+            <select id="orderModelSelect" class="dropdown-filter listing-select" disabled>
+                <option value="">Любая модель</option>
+            </select>
+
+            <label class="listing-field-label">Фон</label>
+            <select id="orderBackdropSelect" class="dropdown-filter listing-select" disabled>
+                <option value="">Любой фон</option>
+            </select>
+
+            <label class="listing-field-label">Символ</label>
+            <select id="orderSymbolSelect" class="dropdown-filter listing-select" disabled>
+                <option value="">Любой символ</option>
+            </select>
+
+            <div class="withdraw-input-box">
+                <input type="number" id="orderMaxPrice" placeholder="Ваша цена 💎" min="0.1" step="0.1">
+            </div>
+
+            <div class="listing-fee-note">Сумма спишется с баланса сразу и вернётся, если вы отмените ордер. Модель/фон/символ можно оставить пустыми — тогда подойдёт любой вариант.</div>
+
+            <button class="action-btn" id="confirmCreateOrderBtn">Создать ордер</button>
+        </div>
+    </div>
+
+    <!-- Модальное окно быстрого создания ордера на трейт конкретного айтема
+         (открывается по кнопке 🧾 на карточке лота). Оформлена как карточка
+         покупки — с картинкой и трейтами айтема, только вместо кнопки "Купить"
+         тут поле для своей цены и кнопка "Создать ордер". -->
+    <div id="quickOrderModal" class="modal" style="display: none;">
+        <div class="modal-content listing-detail-content">
+            <button class="close-modal listing-detail-close" id="closeQuickOrderModal">&times;</button>
+
+            <div class="listing-detail-image-wrap" id="quickOrderImageWrap">
+                <img id="quickOrderImage" class="listing-detail-image" src="" alt="">
+            </div>
+            <div class="listing-detail-title" id="quickOrderTitle"></div>
+            <div class="listing-detail-number" id="quickOrderNumber"></div>
+
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Коллекция</span>
+                <span class="listing-detail-value" id="quickOrderCollection"></span>
+            </div>
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Модель</span>
+                <span class="listing-detail-value" id="quickOrderModel"></span>
+            </div>
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Фон</span>
+                <span class="listing-detail-value" id="quickOrderBackdrop"></span>
+            </div>
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Символ</span>
+                <span class="listing-detail-value" id="quickOrderSymbol"></span>
+            </div>
+
+            <div class="withdraw-input-box" id="quickOrderPriceBox">
+                <input type="number" id="quickOrderPrice" placeholder="Ваша цена 💎" min="0.1" step="0.1">
+            </div>
+            <div class="listing-fee-note" id="quickOrderFeeNote">Сумма спишется с баланса сразу и вернётся, если вы отмените ордер. Подойдёт любой айтем с такими же моделью/фоном/символом.</div>
+            <div class="listing-fee-note quick-order-own-note" id="quickOrderOwnNote" style="display:none;">Это ваш лот — на собственный трейт ордер создать нельзя.</div>
+
+            <button class="action-btn listing-detail-buy quick-order-confirm-btn" id="quickOrderConfirmBtn">Создать ордер</button>
+        </div>
+    </div>
+
+    <!-- Модальное окно детального просмотра ордера (открывается при клике на аватарку в истории ордеров) -->
+    <div id="orderDetailModal" class="modal" style="display: none;">
+        <div class="modal-content listing-detail-content">
+            <button class="close-modal listing-detail-close" id="closeOrderDetail">&times;</button>
+
+            <div class="listing-detail-image-wrap" id="orderDetailImageWrap">
+                <img id="orderDetailImage" class="listing-detail-image" src="" alt="">
+            </div>
+            <div class="listing-detail-title" id="orderDetailTitle"></div>
+            <div class="listing-detail-number" id="orderDetailNumber"></div>
+
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Коллекция</span>
+                <span class="listing-detail-value" id="orderDetailCollection"></span>
+            </div>
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Модель</span>
+                <span class="listing-detail-value" id="orderDetailModel"></span>
+            </div>
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Фон</span>
+                <span class="listing-detail-value" id="orderDetailBackdrop"></span>
+            </div>
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Символ</span>
+                <span class="listing-detail-value" id="orderDetailSymbol"></span>
+            </div>
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Цена</span>
+                <span class="listing-detail-value" id="orderDetailPrice"></span>
+            </div>
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Статус</span>
+                <span class="listing-detail-value" id="orderDetailStatus"></span>
+            </div>
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Создан</span>
+                <span class="listing-detail-value" id="orderDetailCreated"></span>
+            </div>
+            <div class="listing-detail-row" id="orderDetailClosedRow">
+                <span class="listing-detail-label" id="orderDetailClosedLabel">Закрыт</span>
+                <span class="listing-detail-value" id="orderDetailClosed"></span>
+            </div>
+
+            <button class="action-btn listing-detail-buy order-detail-cancel-btn" id="orderDetailCancelBtn">Отменить ордер</button>
+        </div>
+    </div>
+
+    <!-- Модальное окно детального просмотра лота (открывается при клике на 🛒) -->
+    <div id="listingDetailModal" class="modal" style="display: none;">
+        <div class="modal-content listing-detail-content">
+            <button class="close-modal listing-detail-close" id="closeListingDetail">&times;</button>
+
+            <div class="listing-detail-image-wrap" id="listingDetailImageWrap">
+                <img id="listingDetailImage" class="listing-detail-image" src="" alt="">
+            </div>
+            <div class="listing-detail-title" id="listingDetailTitle"></div>
+            <div class="listing-detail-number" id="listingDetailNumber"></div>
+
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Коллекция</span>
+                <span class="listing-detail-value" id="listingDetailCollection"></span>
+            </div>
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Модель</span>
+                <span class="listing-detail-value" id="listingDetailModel"></span>
+            </div>
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Фон</span>
+                <span class="listing-detail-value" id="listingDetailBackdrop"></span>
+            </div>
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Символ</span>
+                <span class="listing-detail-value" id="listingDetailSymbol"></span>
+            </div>
+
+            <button class="action-btn listing-detail-buy" id="listingDetailBuyBtn">
+                Купить <span id="listingDetailPrice"></span> 💎
+            </button>
+            <button class="action-btn listing-detail-cancel" id="listingDetailCancelBtn" style="display: none;">
+                Снять с продажи
+            </button>
+        </div>
+    </div>
+
+    <!-- Модальное окно детального просмотра операции истории (открывается при клике на картинку подарка) -->
+    <div id="historyDetailModal" class="modal" style="display: none;">
+        <div class="modal-content listing-detail-content">
+            <button class="close-modal listing-detail-close" id="closeHistoryDetail">&times;</button>
+
+            <div class="listing-detail-image-wrap" id="historyDetailImageWrap">
+                <img id="historyDetailImage" class="listing-detail-image" src="" alt="">
+            </div>
+            <div class="listing-detail-title" id="historyDetailTitle"></div>
+            <div class="listing-detail-number" id="historyDetailNumber"></div>
+
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Коллекция</span>
+                <span class="listing-detail-value" id="historyDetailCollection"></span>
+            </div>
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Модель</span>
+                <span class="listing-detail-value" id="historyDetailModel"></span>
+            </div>
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Фон</span>
+                <span class="listing-detail-value" id="historyDetailBackdrop"></span>
+            </div>
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Символ</span>
+                <span class="listing-detail-value" id="historyDetailSymbol"></span>
+            </div>
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Операция</span>
+                <span class="listing-detail-value" id="historyDetailType"></span>
+            </div>
+            <div class="listing-detail-row">
+                <span class="listing-detail-label">Дата</span>
+                <span class="listing-detail-value" id="historyDetailDate"></span>
+            </div>
+
+            <div class="history-detail-amount" id="historyDetailAmount"></div>
+        </div>
+    </div>
+
+    <!-- Скрипт подключаем один раз в самом конце -->
+    <script src="app.js?v=11"></script>
+</body>
+</html>
