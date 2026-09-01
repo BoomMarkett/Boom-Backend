@@ -28,7 +28,7 @@ const {
     listOrderHistoryForUser,
     findMatchingOrder,
     listOffersForUser,
-    dismissOfferForOwner,
+    declineOfferAsSeller,
     searchUsersByUsername,
     listOwnedItemsForTgId,
     createTrade,
@@ -892,10 +892,9 @@ app.get('/api/my-offers', requireAuth, (req, res) => {
     res.json({ ok: true, offers });
 });
 
-// === Отклонить предложение для себя: убирает пару "ордер + мой лот" из
-// вкладки "Предложения" ЭТОГО продавца. Сам ордер на покупку остаётся
-// активным — его всё ещё может исполнить любой другой продавец с похожим
-// лотом, это не отмена чужого ордера. ===
+// === Отклонить предложение: полностью отменяет ЧУЖОЙ ордер на покупку,
+// который сматчился с вашим лотом — деньги возвращаются покупателю, ордер
+// пропадает из "Предложений" у всех продавцов (не только у вас). ===
 app.post('/api/my-offers/:orderId/dismiss', requireAuth, (req, res) => {
     const orderId = parseInt(req.params.orderId, 10);
     const listingId = parseInt(req.body.listingId, 10);
@@ -904,9 +903,9 @@ app.post('/api/my-offers/:orderId/dismiss', requireAuth, (req, res) => {
         return res.status(400).json({ ok: false, error: 'Некорректные данные' });
     }
 
-    const ok = dismissOfferForOwner(orderId, listingId, req.tgId);
-    if (!ok) {
-        return res.status(403).json({ ok: false, error: 'Это не ваш лот' });
+    const result = declineOfferAsSeller(orderId, listingId, req.tgId);
+    if (!result.ok) {
+        return res.status(400).json({ ok: false, error: result.error });
     }
     res.json({ ok: true });
 });

@@ -175,21 +175,6 @@ db.exec(`
     CREATE INDEX IF NOT EXISTS idx_trades_recipient ON trades(recipient_tg_id, status);
     CREATE INDEX IF NOT EXISTS idx_trades_initiator ON trades(initiator_tg_id, status);
     CREATE INDEX IF NOT EXISTS idx_trade_items_trade ON trade_items(trade_id);
-
-    -- "Отклонённые" продавцом предложения на свой лот (Ордеры → Предложения).
-    -- Сам ордер (orders) при этом остаётся активным — он не адресован лично
-    -- этому продавцу, это общий ордер на покупку, который сервер сопоставил
-    -- с его лотом по трейтам. Отклонение просто прячет пару
-    -- "этот ордер + этот лот" из списка ЭТОГО продавца, чтобы не мозолила
-    -- глаза, но не мешает другим продавцам с похожим лотом увидеть тот же
-    -- ордер и продать по нему.
-    CREATE TABLE IF NOT EXISTS dismissed_offers (
-        order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
-        listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
-        dismissed_by_tg_id INTEGER NOT NULL REFERENCES users(tg_id),
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        PRIMARY KEY (order_id, listing_id)
-    );
 `);
 
 // === Миграция: добавляем новые колонки в уже существующую базу ===
@@ -764,27 +749,39 @@ function listOffersForUser(tgId) {
             AND (o.symbol_id IS NULL OR o.symbol_id = l.symbol_id)
         WHERE l.status = 'active' AND l.owner_tg_id = @tg_id
           AND o.buyer_tg_id != l.owner_tg_id
-          AND NOT EXISTS (
-              SELECT 1 FROM dismissed_offers d
-              WHERE d.order_id = o.id AND d.listing_id = l.id
-          )
         ORDER BY o.max_price DESC, o.created_at ASC
     `).all({ tg_id: tgId });
 }
 
-/** Отклонить предложение (order+listing) для конкретного продавца — прячет
- * его из listOffersForUser этого продавца, не трогая сам ордер (он остаётся
- * активным и виден другим продавцам с подходящим лотом). Возвращает false,
- * если лот не принадлежит вызывающему (защита от отклонения чужих предложений). */
-function dismissOfferForOwner(orderId, listingId, ownerTgId) {
-    const listing = db.prepare('SELECT owner_tg_id FROM listings WHERE id = ?').get(listingId);
-    if (!listing || listing.owner_tg_id !== ownerTgId) return false;
+/** Продавец отклоняет чужое предложение (order) на свой лот — полностью
+ * отменяет ЧУЖОЙ ордер на покупку целиком, с возвратом зарезервированных
+ * денег покупателю. Ордер при этом пропадает и из "Предложений" у всех
+ * остальных продавцов, у которых был похожий лот (он больше не активен).
+ * Проверяем, что: (1) лот действительно принадлежит вызывающему, (2) ордер
+ * активен и правда подходит под этот лот — не доверяем orderId с фронта вслепую. */
+function declineOfferAsSeller(orderId, listingId, sellerTgId) {
+    const listing = db.prepare('SELECT * FROM listings WHERE id = ?').get(listingId);
+    if (!listing || listing.owner_tg_id !== sellerTgId || listing.status !== 'active') {
+        return { ok: false, error: 'Это не ваш активный лот' };
+    }
 
-    db.prepare(`
-        INSERT OR IGNORE INTO dismissed_offers (order_id, listing_id, dismissed_by_tg_id)
-        VALUES (?, ?, ?)
-    `).run(orderId, listingId, ownerTgId);
-    return true;
+    const order = orderStatements.findById.get(orderId);
+    if (!order || order.status !== 'active') {
+        return { ok: false, error: 'Это предложение уже неактуально' };
+    }
+    if (
+        order.collection_id !== listing.collection_id ||
+        (order.model_id !== null && order.model_id !== listing.model_id) ||
+        (order.backdrop_id !== null && order.backdrop_id !== listing.backdrop_id) ||
+        (order.symbol_id !== null && order.symbol_id !== listing.symbol_id)
+    ) {
+        return { ok: false, error: 'Предложение не подходит под этот лот' };
+    }
+
+    adjustBalance(order.buyer_tg_id, order.max_price);
+    orderStatements.setStatus.run('cancelled', null, 'cancelled', orderId);
+
+    return { ok: true };
 }
 
 // =====================================================================
@@ -1077,7 +1074,7 @@ module.exports = {
     findMatchingOrder,
     findMatchingOrdersForListing,
     listOffersForUser,
-    dismissOfferForOwner,
+    declineOfferAsSeller,
     searchUsersByUsername,
     listOwnedItemsForTgId,
     createTrade,
