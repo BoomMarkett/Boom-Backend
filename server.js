@@ -698,11 +698,11 @@ app.get('/api/games/bomber/state', requireAuth, (req, res) => {
 // (плиток_на_этаже / безопасных_плиток_на_этаже), из которого в конце
 // вычитается комиссия площадки.
 const TOWER_FLOOR_CONFIG = [
-    { tiles: 6, traps: 3 }, // этаж 1
-    { tiles: 5, traps: 3 }, // этаж 2
-    { tiles: 4, traps: 2 }, // этаж 3
-    { tiles: 3, traps: 2 }, // этаж 4
-    { tiles: 2, traps: 1 }, // этаж 5 (вершина)
+    { tiles: 8, traps: 3 }, // этаж 1 — кумулятивно ~x1.52
+    { tiles: 4, traps: 1 }, // этаж 2 — кумулятивно ~x2.03
+    { tiles: 6, traps: 2 }, // этаж 3 — кумулятивно ~x3.04
+    { tiles: 7, traps: 1 }, // этаж 4 — кумулятивно ~x3.55
+    { tiles: 7, traps: 2 }, // этаж 5 (вершина) — кумулятивно ~x4.97
 ];
 const TOWER_FLOORS = TOWER_FLOOR_CONFIG.length;
 const TOWER_MIN_BET = 0.3;
