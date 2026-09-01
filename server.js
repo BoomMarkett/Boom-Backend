@@ -27,6 +27,7 @@ const {
     listOrderHistoryForUser,
     findMatchingOrder,
     listOffersForUser,
+    dismissOfferForOwner,
     searchUsersByUsername,
     listOwnedItemsForTgId,
     createTrade,
@@ -871,6 +872,25 @@ app.post('/api/listings/:id/relist', requireAuth, (req, res) => {
 app.get('/api/my-offers', requireAuth, (req, res) => {
     const offers = listOffersForUser(req.tgId);
     res.json({ ok: true, offers });
+});
+
+// === Отклонить предложение для себя: убирает пару "ордер + мой лот" из
+// вкладки "Предложения" ЭТОГО продавца. Сам ордер на покупку остаётся
+// активным — его всё ещё может исполнить любой другой продавец с похожим
+// лотом, это не отмена чужого ордера. ===
+app.post('/api/my-offers/:orderId/dismiss', requireAuth, (req, res) => {
+    const orderId = parseInt(req.params.orderId, 10);
+    const listingId = parseInt(req.body.listingId, 10);
+
+    if (!Number.isInteger(orderId) || !Number.isInteger(listingId)) {
+        return res.status(400).json({ ok: false, error: 'Некорректные данные' });
+    }
+
+    const ok = dismissOfferForOwner(orderId, listingId, req.tgId);
+    if (!ok) {
+        return res.status(403).json({ ok: false, error: 'Это не ваш лот' });
+    }
+    res.json({ ok: true });
 });
 
 // === Продать лот конкретному ордеру-предложению (владелец сам выбирает,
