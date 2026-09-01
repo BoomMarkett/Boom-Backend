@@ -20,6 +20,7 @@ const {
     createTransaction,
     listTransactionsForUser,
     createOrder,
+    hasOwnMatchingListing,
     getOrderById,
     getOrderWithDetails,
     setOrderStatus,
@@ -42,6 +43,16 @@ const {
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Запрещаем кэширование ответов API — иначе некоторые браузеры/WebView
+// (в т.ч. внутри Telegram) могут отдать закэшированный GET-ответ повторно,
+// и после действий вроде отмены ордера или трейда список на экране будет
+// какое-то время показывать устаревшие данные, даже если сервер уже всё
+// обновил.
+app.use('/api', (req, res, next) => {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+    next();
+});
 
 const BOT_TOKEN = process.env.BOT_TOKEN || '';
 const JWT_SECRET = process.env.JWT_SECRET || '';
@@ -677,6 +688,13 @@ app.post('/api/orders', requireAuth, (req, res) => {
     }
     if (!isValidAmount(parsedPrice, 0.1, 100000)) {
         return res.status(400).json({ ok: false, error: 'Цена должна быть от 0.1 до 100000, максимум с одним знаком после запятой' });
+    }
+
+    // Нельзя создать ордер на покупку, который сразу же "сматчится" с
+    // собственным активным лотом — иначе продавец видел бы у себя же
+    // предложение купить собственный товар.
+    if (hasOwnMatchingListing(req.tgId, { collectionId, modelId, backdropId, symbolId })) {
+        return res.status(400).json({ ok: false, error: 'У вас уже есть подходящий под этот ордер лот на продаже — нельзя ставить ордер на свой же товар' });
     }
 
     let buyer;

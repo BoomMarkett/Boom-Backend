@@ -608,6 +608,31 @@ const orderStatements = {
     `),
 };
 
+/** Проверяет, есть ли у пользователя собственный активный лот, который
+ * совпадёт с ордером, задаваемым этими фильтрами — та же логика сопоставления,
+ * что и в listOffersForUser (NULL в фильтре ордера = "любой"). Используется,
+ * чтобы не дать пользователю создать ордер на покупку, который тут же
+ * "сматчится" с его же собственным лотом. */
+function hasOwnMatchingListing(tgId, { collectionId, modelId, backdropId, symbolId }) {
+    const row = db.prepare(`
+        SELECT 1 FROM listings
+        WHERE status = 'active'
+          AND owner_tg_id = @tg_id
+          AND collection_id = @collection_id
+          AND (@model_id IS NULL OR model_id = @model_id)
+          AND (@backdrop_id IS NULL OR backdrop_id = @backdrop_id)
+          AND (@symbol_id IS NULL OR symbol_id = @symbol_id)
+        LIMIT 1
+    `).get({
+        tg_id: tgId,
+        collection_id: collectionId,
+        model_id: modelId ?? null,
+        backdrop_id: backdropId ?? null,
+        symbol_id: symbolId ?? null,
+    });
+    return !!row;
+}
+
 function createOrder(data) {
     const info = orderStatements.insert.run({
         buyer_tg_id: data.buyer_tg_id,
@@ -738,6 +763,7 @@ function listOffersForUser(tgId) {
             AND (o.backdrop_id IS NULL OR o.backdrop_id = l.backdrop_id)
             AND (o.symbol_id IS NULL OR o.symbol_id = l.symbol_id)
         WHERE l.status = 'active' AND l.owner_tg_id = @tg_id
+          AND o.buyer_tg_id != l.owner_tg_id
           AND NOT EXISTS (
               SELECT 1 FROM dismissed_offers d
               WHERE d.order_id = o.id AND d.listing_id = l.id
@@ -1042,6 +1068,7 @@ module.exports = {
     createTransaction,
     listTransactionsForUser,
     createOrder,
+    hasOwnMatchingListing,
     getOrderById,
     getOrderWithDetails,
     setOrderStatus,
