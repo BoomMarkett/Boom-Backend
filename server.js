@@ -671,18 +671,20 @@ app.get('/api/games/bomber/state', requireAuth, (req, res) => {
 // =====================================================================
 //
 // Правила:
-//   - Башня состоит из TOWER_FLOORS этажей. Перед стартом игрок выбирает
-//     уровень сложности и делает ставку:
-//       • Лёгкий  — 4 плитки на этаже, 1 ловушка (шанс пройти этаж 3/4)
-//       • Средний — 3 плитки на этаже, 1 ловушка (шанс пройти этаж 2/3)
-//       • Сложный — 2 плитки на этаже, 1 ловушка (шанс пройти этаж 1/2)
-//   - На каждом этаже ловушка расставляется случайно и хранится ТОЛЬКО
-//     на сервере — клиент не знает, где она, пока не наступит на плитку
+//   - Башня состоит из 5 этажей с ФИКСИРОВАННОЙ конфигурацией — на каждом
+//     этаже своё количество плиток и ловушек (чем выше этаж, тем меньше
+//     плиток, но и множитель на нём круче):
+//       • Этаж 1 — 6 плиток, 3 ловушки (шанс пройти этаж 3/6 = 50%)
+//       • Этаж 2 — 5 плиток, 3 ловушки (шанс пройти этаж 2/5 = 40%)
+//       • Этаж 3 — 4 плитки, 2 ловушки (шанс пройти этаж 2/4 = 50%)
+//       • Этаж 4 — 3 плитки, 2 ловушки (шанс пройти этаж 1/3 ≈ 33%)
+//       • Этаж 5 — 2 плитки, 1 ловушка (шанс пройти этаж 1/2 = 50%)
+//   - На каждом этаже ловушки расставляются случайно и хранятся ТОЛЬКО
+//     на сервере — клиент не знает, где они, пока не наступит на плитку
 //     или не проиграет.
 //   - Игрок выбирает одну плитку на текущем (нижнем непройденном) этаже.
 //     Если плитка безопасна — игрок поднимается на этаж выше, множитель
-//     выигрыша растёт. Чем выше поднялся и чем выше сложность — тем
-//     больше множитель и тем выше риск наступить на ловушку.
+//     выигрыша растёт. Чем выше поднялся — тем больше множитель и риск.
 //   - В любой момент после подъёма хотя бы на один этаж можно нажать
 //     «Забрать выигрыш» (Cashout) — ставка × текущий множитель
 //     зачисляется на баланс.
@@ -690,50 +692,54 @@ app.get('/api/games/bomber/state', requireAuth, (req, res) => {
 //   - Если пройдены ВСЕ этажи (достигнута вершина башни) — выигрыш
 //     засчитывается автоматически по максимальному множителю раунда.
 //
-// В отличие от «Бомбера» (общее поле, выбор без возврата), здесь каждый
-// этаж — независимое испытание с одной ловушкой на своём наборе плиток,
-// поэтому множитель считается простой геометрической прогрессией:
-// (плиток_на_этаже / безопасных_плиток) ^ количество_пройденных_этажей,
-// из которой вычитается комиссия площадки.
-const TOWER_FLOORS = 8;
+// Каждый этаж — независимое испытание (ловушки каждого этажа выбираются
+// заново, вне зависимости от других этажей), поэтому множитель считается
+// произведением честных множителей каждого пройденного этажа
+// (плиток_на_этаже / безопасных_плиток_на_этаже), из которого в конце
+// вычитается комиссия площадки.
+const TOWER_FLOOR_CONFIG = [
+    { tiles: 6, traps: 3 }, // этаж 1
+    { tiles: 5, traps: 3 }, // этаж 2
+    { tiles: 4, traps: 2 }, // этаж 3
+    { tiles: 3, traps: 2 }, // этаж 4
+    { tiles: 2, traps: 1 }, // этаж 5 (вершина)
+];
+const TOWER_FLOORS = TOWER_FLOOR_CONFIG.length;
 const TOWER_MIN_BET = 0.3;
 const TOWER_MAX_BET = 1000;
 const TOWER_HOUSE_EDGE = 0.05; // 5% комиссии площадки, зашита в множитель
-const TOWER_DIFFICULTIES = {
-    easy: { id: 'easy', label: 'Лёгкий', tiles: 4, traps: 1 },
-    medium: { id: 'medium', label: 'Средний', tiles: 3, traps: 1 },
-    hard: { id: 'hard', label: 'Сложный', tiles: 2, traps: 1 },
-};
 
 // Активные раунды хранятся в памяти процесса (как и у слотов/рулетки/бомбера) —
 // раунд живёт от старта до кэшаута/проигрыша, между рестартами сервера
 // персистентность не нужна. Один активный раунд на пользователя одновременно.
-const towerActiveGames = new Map(); // tgId -> { bet, difficulty, trapsByFloor:[], climbed, path:[], startedAt }
+const towerActiveGames = new Map(); // tgId -> { bet, trapsByFloor:[[...]], climbed, path:[], startedAt }
 
-function towerFloorFactor(difficulty) {
-    const d = TOWER_DIFFICULTIES[difficulty];
-    return d.tiles / (d.tiles - d.traps);
+function towerFloorFactor(floorIndex) {
+    const cfg = TOWER_FLOOR_CONFIG[floorIndex];
+    return cfg.tiles / (cfg.tiles - cfg.traps);
 }
 
-function towerFairMultiplier(difficulty, floorsClimbed) {
-    return Math.pow(towerFloorFactor(difficulty), floorsClimbed);
+function towerFairMultiplier(floorsClimbed) {
+    let mult = 1;
+    for (let i = 0; i < floorsClimbed; i++) {
+        mult *= towerFloorFactor(i);
+    }
+    return mult;
 }
 
-function towerMultiplier(difficulty, floorsClimbed) {
+function towerMultiplier(floorsClimbed) {
     if (floorsClimbed <= 0) return 1;
-    return towerFairMultiplier(difficulty, floorsClimbed) * (1 - TOWER_HOUSE_EDGE);
+    return towerFairMultiplier(floorsClimbed) * (1 - TOWER_HOUSE_EDGE);
 }
 
 function towerPublicState(game) {
-    const d = TOWER_DIFFICULTIES[game.difficulty];
-    const currentMultiplier = Math.round(towerMultiplier(game.difficulty, game.climbed) * 100) / 100;
+    const currentMultiplier = Math.round(towerMultiplier(game.climbed) * 100) / 100;
     const nextMultiplier = game.climbed < TOWER_FLOORS
-        ? Math.round(towerMultiplier(game.difficulty, game.climbed + 1) * 100) / 100
+        ? Math.round(towerMultiplier(game.climbed + 1) * 100) / 100
         : null;
     return {
         bet: game.bet,
-        difficulty: game.difficulty,
-        tilesPerFloor: d.tiles,
+        floors: TOWER_FLOOR_CONFIG.map(f => ({ tiles: f.tiles, traps: f.traps })),
         totalFloors: TOWER_FLOORS,
         climbed: game.climbed,
         path: [...game.path],
@@ -743,19 +749,25 @@ function towerPublicState(game) {
     };
 }
 
+// Расставляет `traps` уникальных ловушек среди `tiles` плиток этажа.
+function towerGenerateFloorTraps(tiles, traps) {
+    const positions = Array.from({ length: tiles }, (_, i) => i);
+    for (let i = positions.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [positions[i], positions[j]] = [positions[j], positions[i]];
+    }
+    return positions.slice(0, traps);
+}
+
 // === Начать раунд: списываем ставку сразу (резерв), расставляем ловушки ===
 app.post('/api/games/tower/start', requireAuth, (req, res) => {
     const bet = parseFloat(req.body.bet);
-    const difficulty = req.body.difficulty;
 
     if (!isValidAmount(bet, TOWER_MIN_BET, TOWER_MAX_BET)) {
         return res.status(400).json({
             ok: false,
             error: `Ставка должна быть от ${TOWER_MIN_BET} до ${TOWER_MAX_BET} TON, максимум с одним знаком после запятой`,
         });
-    }
-    if (!TOWER_DIFFICULTIES[difficulty]) {
-        return res.status(400).json({ ok: false, error: 'Некорректный уровень сложности' });
     }
     if (towerActiveGames.has(req.tgId)) {
         return res.status(400).json({ ok: false, error: 'У вас уже есть активный раунд — завершите его (выберите плитку или заберите выигрыш)' });
@@ -768,10 +780,9 @@ app.post('/api/games/tower/start', requireAuth, (req, res) => {
         return res.status(400).json({ ok: false, error: 'Недостаточно средств на балансе' });
     }
 
-    const d = TOWER_DIFFICULTIES[difficulty];
-    const trapsByFloor = Array.from({ length: TOWER_FLOORS }, () => Math.floor(Math.random() * d.tiles));
+    const trapsByFloor = TOWER_FLOOR_CONFIG.map(cfg => towerGenerateFloorTraps(cfg.tiles, cfg.traps));
 
-    const game = { bet, difficulty, trapsByFloor, climbed: 0, path: [], startedAt: Date.now() };
+    const game = { bet, trapsByFloor, climbed: 0, path: [], startedAt: Date.now() };
     towerActiveGames.set(req.tgId, game);
 
     res.json({ ok: true, balance: user.balance, game: towerPublicState(game) });
@@ -785,15 +796,16 @@ app.post('/api/games/tower/pick', requireAuth, (req, res) => {
     if (!game) {
         return res.status(400).json({ ok: false, error: 'Нет активного раунда — начните новую игру' });
     }
-    const d = TOWER_DIFFICULTIES[game.difficulty];
-    if (!Number.isInteger(tile) || tile < 0 || tile >= d.tiles) {
+
+    const floor = game.climbed;
+    const cfg = TOWER_FLOOR_CONFIG[floor];
+    if (!Number.isInteger(tile) || tile < 0 || tile >= cfg.tiles) {
         return res.status(400).json({ ok: false, error: 'Некорректная плитка' });
     }
 
-    const floor = game.climbed;
-    const trapTile = game.trapsByFloor[floor];
+    const floorTraps = game.trapsByFloor[floor];
 
-    if (tile === trapTile) {
+    if (floorTraps.includes(tile)) {
         // Ловушка — раунд проигран, ставка не возвращается (она уже списана при старте).
         towerActiveGames.delete(req.tgId);
         createTransaction({ tg_id: req.tgId, type: 'game_tower', amount: -game.bet });
@@ -802,11 +814,10 @@ app.post('/api/games/tower/pick', requireAuth, (req, res) => {
             win: false,
             floor,
             hitTile: tile,
-            trapTile,
+            trapTiles: floorTraps,
             betAmount: game.bet,
             winAmount: 0,
-            difficulty: game.difficulty,
-            tilesPerFloor: d.tiles,
+            tilesPerFloor: cfg.tiles,
         });
     }
 
@@ -815,7 +826,7 @@ app.post('/api/games/tower/pick', requireAuth, (req, res) => {
 
     if (game.climbed >= TOWER_FLOORS) {
         // Пройдены все этажи — автоматический кэшаут по максимальному множителю.
-        const multiplier = Math.round(towerMultiplier(game.difficulty, game.climbed) * 100) / 100;
+        const multiplier = Math.round(towerMultiplier(game.climbed) * 100) / 100;
         const winAmount = Math.round(game.bet * multiplier * 100) / 100;
         towerActiveGames.delete(req.tgId);
         const user = adjustBalance(req.tgId, winAmount);
@@ -846,7 +857,7 @@ app.post('/api/games/tower/cashout', requireAuth, (req, res) => {
         return res.status(400).json({ ok: false, error: 'Поднимитесь хотя бы на один этаж перед выводом' });
     }
 
-    const multiplier = Math.round(towerMultiplier(game.difficulty, game.climbed) * 100) / 100;
+    const multiplier = Math.round(towerMultiplier(game.climbed) * 100) / 100;
     const winAmount = Math.round(game.bet * multiplier * 100) / 100;
     towerActiveGames.delete(req.tgId);
 
