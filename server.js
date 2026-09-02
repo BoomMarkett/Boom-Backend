@@ -394,6 +394,17 @@ app.post('/api/inventory/add', requireAuth, (req, res) => {
 // ИГРА "СЛОТЫ"
 // =====================================================================
 
+// Комиссия с выигрыша — удерживается со всех игр в разделе казино
+// (слоты, рулетка, бомбер, башня, кости, плинко). Считается от суммы
+// выигрыша (не от ставки и не при проигрыше), округляется до копеек так же,
+// как и сам выигрыш.
+const GAME_WIN_FEE_PERCENT = 0.01;
+
+function applyGameWinFee(rawWinAmount) {
+    if (!rawWinAmount) return rawWinAmount;
+    return Math.round(rawWinAmount * (1 - GAME_WIN_FEE_PERCENT / 100) * 100) / 100;
+}
+
 // Символы барабана и их "вес" — насколько часто они выпадают на одном
 // барабане (не шанс всей комбинации!). Редкие символы дают больший
 // множитель, поэтому и выпадают реже.
@@ -433,7 +444,7 @@ app.post('/api/games/slots/spin', requireAuth, (req, res) => {
     const isWin = reels[0] === reels[1] && reels[1] === reels[2];
     const winSymbol = SLOTS_SYMBOLS.find(s => s.id === reels[0]);
     const multiplier = isWin ? winSymbol.multiplier : 0;
-    const winAmount = isWin ? Math.round(bet * multiplier * 100) / 100 : 0;
+    const winAmount = isWin ? applyGameWinFee(Math.round(bet * multiplier * 100) / 100) : 0;
 
     // Одна операция с балансом: -ставка, +выигрыш (0, если проигрыш) —
     // без промежуточного шага, чтобы не оставлять пользователя "в минусе"
@@ -504,7 +515,7 @@ app.post('/api/games/roulette/spin', requireAuth, (req, res) => {
 
     const segment = spinRoulette();
     const isWin = segment.multiplier > 0;
-    const winAmount = isWin ? Math.round(bet * segment.multiplier * 100) / 100 : 0;
+    const winAmount = isWin ? applyGameWinFee(Math.round(bet * segment.multiplier * 100) / 100) : 0;
 
     // Одна операция с балансом: -ставка, +выигрыш (0, если проигрыш).
     const netDelta = Math.round((winAmount - bet) * 100) / 100;
@@ -672,7 +683,7 @@ app.post('/api/games/bomber/reveal', requireAuth, (req, res) => {
     if (game.revealed.size >= safeCellsTotal) {
         // Открыты все безопасные ячейки — автоматический кэшаут по максимальному множителю.
         const multiplier = Math.round(bomberMultiplier(game.bombs, game.revealed.size) * 100) / 100;
-        const winAmount = Math.round(game.bet * multiplier * 100) / 100;
+        const winAmount = applyGameWinFee(Math.round(game.bet * multiplier * 100) / 100);
         bomberActiveGames.delete(req.tgId);
         const user = adjustBalance(req.tgId, winAmount);
         createTransaction({ tg_id: req.tgId, type: 'game_bomber', amount: winAmount - game.bet });
@@ -703,7 +714,7 @@ app.post('/api/games/bomber/cashout', requireAuth, (req, res) => {
     }
 
     const multiplier = Math.round(bomberMultiplier(game.bombs, game.revealed.size) * 100) / 100;
-    const winAmount = Math.round(game.bet * multiplier * 100) / 100;
+    const winAmount = applyGameWinFee(Math.round(game.bet * multiplier * 100) / 100);
     bomberActiveGames.delete(req.tgId);
 
     const user = adjustBalance(req.tgId, winAmount);
@@ -869,7 +880,7 @@ app.post('/api/games/tower/pick', requireAuth, (req, res) => {
     if (game.climbed >= TOWER_FLOORS) {
         // Пройдены все этажи — автоматический кэшаут по максимальному множителю.
         const multiplier = Math.round(towerMultiplier(game.climbed) * 100) / 100;
-        const winAmount = Math.round(game.bet * multiplier * 100) / 100;
+        const winAmount = applyGameWinFee(Math.round(game.bet * multiplier * 100) / 100);
         towerActiveGames.delete(req.tgId);
         const user = adjustBalance(req.tgId, winAmount);
         createTransaction({ tg_id: req.tgId, type: 'game_tower', amount: winAmount - game.bet });
@@ -900,7 +911,7 @@ app.post('/api/games/tower/cashout', requireAuth, (req, res) => {
     }
 
     const multiplier = Math.round(towerMultiplier(game.climbed) * 100) / 100;
-    const winAmount = Math.round(game.bet * multiplier * 100) / 100;
+    const winAmount = applyGameWinFee(Math.round(game.bet * multiplier * 100) / 100);
     towerActiveGames.delete(req.tgId);
 
     const user = adjustBalance(req.tgId, winAmount);
@@ -951,7 +962,7 @@ app.post('/api/games/dice/roll', requireAuth, (req, res) => {
     // Бросок — случайное число от 1 до 6.
     const roll = 1 + Math.floor(Math.random() * 6);
     const isWin = roll === number;
-    const winAmount = isWin ? Math.round(bet * DICE_PAYOUT_MULTIPLIER * 100) / 100 : 0;
+    const winAmount = isWin ? applyGameWinFee(Math.round(bet * DICE_PAYOUT_MULTIPLIER * 100) / 100) : 0;
     const netDelta = Math.round((winAmount - bet) * 100) / 100;
 
     let user;
@@ -1046,7 +1057,7 @@ app.post('/api/games/plinko/drop', requireAuth, (req, res) => {
     const slotIndex = plinkoPickBinIndex();
     const path = plinkoGeneratePath(slotIndex);
     const multiplier = PLINKO_MULTIPLIERS[slotIndex];
-    const winAmount = Math.round(bet * multiplier * 100) / 100;
+    const winAmount = applyGameWinFee(Math.round(bet * multiplier * 100) / 100);
     const netDelta = Math.round((winAmount - bet) * 100) / 100;
 
     let user;
