@@ -20,6 +20,7 @@ const {
     createTransaction,
     listTransactionsForUser,
     createOrder,
+    hasOwnMatchingListing,
     getOrderById,
     getOrderWithDetails,
     setOrderStatus,
@@ -1098,6 +1099,13 @@ app.post('/api/orders', requireAuth, (req, res) => {
         return res.status(400).json({ ok: false, error: 'Количество должно быть целым числом от 1 до 1000' });
     }
 
+    // Нельзя создать ордер на покупку, который сразу же "сматчится" с
+    // собственным активным лотом — иначе продавец видел бы у себя же
+    // предложение купить собственный товар.
+    if (hasOwnMatchingListing(req.tgId, { collectionId, modelId, backdropId, symbolId })) {
+        return res.status(400).json({ ok: false, error: 'У вас уже есть подходящий под этот ордер лот на продаже — нельзя ставить ордер на свой же товар' });
+    }
+
     // Резервируем сразу всю сумму на все запрошенные единицы — цена за 1 штуку × количество.
     const totalReserve = Math.round(parsedPrice * parsedQuantity * 100) / 100;
 
@@ -1348,8 +1356,13 @@ app.post('/api/listings/:id/accept-offer', requireAuth, (req, res) => {
     if (listing.owner_tg_id !== req.tgId) {
         return res.status(403).json({ ok: false, error: 'Это не ваш листинг' });
     }
-    if (listing.status !== 'active') {
-        return res.status(400).json({ ok: false, error: 'Листинг уже неактивен' });
+    // Разрешаем принимать предложение как по уже выставленному лоту ('active'),
+    // так и по товару прямо из хранилища ('owned') — второе используется
+    // кнопкой "Быстрая продажа" на Маркете, чтобы продать без промежуточного
+    // выставления на продажу. Цена самого листинга тут не участвует вообще —
+    // сделка всегда проходит по цене ордера (order.max_price) ниже.
+    if (listing.status !== 'active' && listing.status !== 'owned') {
+        return res.status(400).json({ ok: false, error: 'Товар недоступен для продажи' });
     }
 
     const orderId = parseInt(req.body.orderId, 10);

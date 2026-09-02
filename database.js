@@ -675,9 +675,9 @@ function ordersDetailQuery() {
         SELECT
             o.id, o.buyer_tg_id, o.max_price, o.quantity, o.filled_count, o.status, o.created_at, o.closed_at, o.matched_listing_id,
             c.id AS collection_id, c.name AS collection_name, c.image_url AS collection_image,
-            gm.name AS model_name, gm.image_url AS model_image,
-            gb.name AS backdrop_name, gb.color_hex AS backdrop_color,
-            gs.name AS symbol_name, gs.icon_url AS symbol_icon,
+            gm.id AS model_id, gm.name AS model_name, gm.image_url AS model_image,
+            gb.id AS backdrop_id, gb.name AS backdrop_name, gb.color_hex AS backdrop_color,
+            gs.id AS symbol_id, gs.name AS symbol_name, gs.icon_url AS symbol_icon,
             ml.price AS matched_price, ml.gift_number AS matched_gift_number
         FROM orders o
         JOIN collections c ON c.id = o.collection_id
