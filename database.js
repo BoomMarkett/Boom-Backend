@@ -128,6 +128,8 @@ db.exec(`
         backdrop_id INTEGER REFERENCES gift_backdrops(id),
         symbol_id INTEGER REFERENCES gift_symbols(id),
         max_price REAL NOT NULL,
+        quantity INTEGER NOT NULL DEFAULT 1,     -- сколько айтемов всего нужно купить
+        filled_count INTEGER NOT NULL DEFAULT 0, -- сколько уже куплено по этому ордеру
         status TEXT NOT NULL DEFAULT 'active', -- active | cancelled | filled
         matched_listing_id INTEGER REFERENCES listings(id),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -194,6 +196,12 @@ addColumnIfMissing('gift_backdrops', 'image_url', 'TEXT');
 addColumnIfMissing('trades', 'ton_amount', "REAL NOT NULL DEFAULT 0");
 addColumnIfMissing('trades', 'ton_payer', 'TEXT');
 addColumnIfMissing('trades', 'fee_amount', "REAL NOT NULL DEFAULT 0");
+// Ордер теперь может просить сразу НЕСКОЛЬКО одинаковых айтемов — quantity
+// (сколько всего) и filled_count (сколько уже куплено по этому ордеру).
+// У старых ордеров, созданных до этого изменения, quantity=1, filled_count=0 —
+// именно так они себя и вели раньше (один ордер = один айтем).
+addColumnIfMissing('orders', 'quantity', 'INTEGER NOT NULL DEFAULT 1');
+addColumnIfMissing('orders', 'filled_count', 'INTEGER NOT NULL DEFAULT 0');
 
 // === Подготовленные запросы: пользователи ===
 const userStatements = {
@@ -580,8 +588,8 @@ function listTransactionsForUser(tgId) {
 // === Подготовленные запросы: ордера на покупку ===
 const orderStatements = {
     insert: db.prepare(`
-        INSERT INTO orders (buyer_tg_id, collection_id, model_id, backdrop_id, symbol_id, max_price)
-        VALUES (@buyer_tg_id, @collection_id, @model_id, @backdrop_id, @symbol_id, @max_price)
+        INSERT INTO orders (buyer_tg_id, collection_id, model_id, backdrop_id, symbol_id, max_price, quantity)
+        VALUES (@buyer_tg_id, @collection_id, @model_id, @backdrop_id, @symbol_id, @max_price, @quantity)
     `),
     findById: db.prepare('SELECT * FROM orders WHERE id = ?'),
     setStatus: db.prepare(`
@@ -589,6 +597,17 @@ const orderStatements = {
         SET status = ?,
             matched_listing_id = COALESCE(?, matched_listing_id),
             closed_at = CASE WHEN ? != 'active' THEN datetime('now') ELSE closed_at END
+        WHERE id = ?
+    `),
+    // Засчитывает ОДНУ продажу по ордеру (filled_count+1) — ордер остаётся
+    // 'active', пока не выкуплено всё запрошенное количество, и закрывается
+    // сам собой, когда filled_count достигает quantity.
+    fillOnce: db.prepare(`
+        UPDATE orders
+        SET filled_count = filled_count + 1,
+            matched_listing_id = ?,
+            status = CASE WHEN filled_count + 1 >= quantity THEN 'filled' ELSE status END,
+            closed_at = CASE WHEN filled_count + 1 >= quantity THEN datetime('now') ELSE closed_at END
         WHERE id = ?
     `),
 };
@@ -626,6 +645,7 @@ function createOrder(data) {
         backdrop_id: data.backdrop_id ?? null,
         symbol_id: data.symbol_id ?? null,
         max_price: data.max_price,
+        quantity: data.quantity ?? 1,
     });
     return orderStatements.findById.get(info.lastInsertRowid);
 }
@@ -639,13 +659,21 @@ function setOrderStatus(id, status, matchedListingId = null) {
     return getOrderById(id);
 }
 
+// Засчитывает выкуп ОДНОЙ единицы по ордеру (см. orderStatements.fillOnce) —
+// используется и при мгновенном авто-матче на создание лота, и при принятии
+// предложения продавцом; ордер закрывается сам, когда выкуплено всё quantity.
+function fillOrderOnce(id, listingId) {
+    orderStatements.fillOnce.run(listingId, id);
+    return getOrderById(id);
+}
+
 // Общий SELECT: критерии ордера (коллекция/модель/фон/символ, через JOIN на
 // каталог трейтов — так же, как для листингов) + данные исполненного лота,
 // если ордер уже сматчился (matched_listing_id).
 function ordersDetailQuery() {
     return `
         SELECT
-            o.id, o.buyer_tg_id, o.max_price, o.status, o.created_at, o.closed_at, o.matched_listing_id,
+            o.id, o.buyer_tg_id, o.max_price, o.quantity, o.filled_count, o.status, o.created_at, o.closed_at, o.matched_listing_id,
             c.id AS collection_id, c.name AS collection_name, c.image_url AS collection_image,
             gm.name AS model_name, gm.image_url AS model_image,
             gb.name AS backdrop_name, gb.color_hex AS backdrop_color,
@@ -670,6 +698,39 @@ function listActiveOrdersForUser(tgId) {
 
 function listOrderHistoryForUser(tgId) {
     return db.prepare(`${ordersDetailQuery()} WHERE o.buyer_tg_id = ? AND o.status != 'active' ORDER BY o.created_at DESC`).all(tgId);
+}
+
+/**
+ * Ордербук по конкретной коллекции (для кнопки "Смотреть ордера" на Маркете,
+ * открытой при выбранной коллекции) — ВСЕ активные ордера всех покупателей
+ * на эту коллекцию, опционально суженные по модели/фону/символу. Ордер
+ * считается подходящим, если по этому полю у него не задано ограничение
+ * (значит подойдёт любой вариант) ИЛИ оно совпадает с тем, что выбрал
+ * смотрящий — то есть он увидит все ордера, которые сможет закрыть,
+ * продав айтем с выбранными трейтами.
+ */
+function listOrdersForCollection({ collectionId, modelName, backdropName, symbolName }) {
+    const where = [`o.status = 'active'`, 'o.collection_id = @collection_id'];
+    const params = { collection_id: collectionId };
+
+    if (modelName) {
+        where.push('(gm.name IS NULL OR gm.name = @model_name)');
+        params.model_name = modelName;
+    }
+    if (backdropName) {
+        where.push('(gb.name IS NULL OR gb.name = @backdrop_name)');
+        params.backdrop_name = backdropName;
+    }
+    if (symbolName) {
+        where.push('(gs.name IS NULL OR gs.name = @symbol_name)');
+        params.symbol_name = symbolName;
+    }
+
+    return db.prepare(`
+        ${ordersDetailQuery()}
+        WHERE ${where.join(' AND ')}
+        ORDER BY o.max_price DESC, o.created_at ASC
+    `).all(params);
 }
 
 /**
@@ -813,7 +874,11 @@ function declineOfferAsSeller(orderId, listingId, sellerTgId) {
         return { ok: false, error: 'Предложение не подходит под этот лот' };
     }
 
-    adjustBalance(order.buyer_tg_id, order.max_price);
+    // Возвращаем только НЕвыкупленную часть — если по ордеру уже что-то
+    // куплено (quantity > 1), эти деньги покупателю не принадлежат, они уже
+    // потрачены на прошлые сделки по этому же ордеру.
+    const refund = Math.round(order.max_price * (order.quantity - order.filled_count) * 100) / 100;
+    adjustBalance(order.buyer_tg_id, refund);
     orderStatements.setStatus.run('cancelled', null, 'cancelled', orderId);
 
     return { ok: true };
@@ -1104,8 +1169,10 @@ module.exports = {
     getOrderById,
     getOrderWithDetails,
     setOrderStatus,
+    fillOrderOnce,
     listActiveOrdersForUser,
     listOrderHistoryForUser,
+    listOrdersForCollection,
     findMatchingOrder,
     findMatchingOrdersForListing,
     findMatchingListingsForOrder,

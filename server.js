@@ -23,8 +23,10 @@ const {
     getOrderById,
     getOrderWithDetails,
     setOrderStatus,
+    fillOrderOnce,
     listActiveOrdersForUser,
     listOrderHistoryForUser,
+    listOrdersForCollection,
     findMatchingOrder,
     findMatchingListingsForOrder,
     listOffersForUser,
@@ -343,7 +345,7 @@ app.post('/api/listings', requireAuth, (req, res) => {
         // помечается "sold" с прежним владельцем.
         const details = getListingWithDetails(listing.id);
         const soldListing = transferListingToBuyer(listing.id, matchedOrder.buyer_tg_id);
-        setOrderStatus(matchedOrder.id, 'filled', listing.id);
+        fillOrderOnce(matchedOrder.id, listing.id);
 
         const giftSnapshot = {
             listing_id: listing.id,
@@ -1082,8 +1084,9 @@ app.post('/api/games/plinko/drop', requireAuth, (req, res) => {
 
 // === Создать ордер на покупку (сумма сразу резервируется на балансе) ===
 app.post('/api/orders', requireAuth, (req, res) => {
-    const { collectionId, modelId, backdropId, symbolId, maxPrice } = req.body;
+    const { collectionId, modelId, backdropId, symbolId, maxPrice, quantity } = req.body;
     const parsedPrice = parseFloat(maxPrice);
+    const parsedQuantity = parseInt(quantity, 10) || 1;
 
     if (!collectionId) {
         return res.status(400).json({ ok: false, error: 'Выберите коллекцию' });
@@ -1091,10 +1094,16 @@ app.post('/api/orders', requireAuth, (req, res) => {
     if (!isValidAmount(parsedPrice, 0.1, 100000)) {
         return res.status(400).json({ ok: false, error: 'Цена должна быть от 0.1 до 100000, максимум с одним знаком после запятой' });
     }
+    if (!Number.isInteger(parsedQuantity) || parsedQuantity < 1 || parsedQuantity > 1000) {
+        return res.status(400).json({ ok: false, error: 'Количество должно быть целым числом от 1 до 1000' });
+    }
+
+    // Резервируем сразу всю сумму на все запрошенные единицы — цена за 1 штуку × количество.
+    const totalReserve = Math.round(parsedPrice * parsedQuantity * 100) / 100;
 
     let buyer;
     try {
-        buyer = adjustBalance(req.tgId, -parsedPrice);
+        buyer = adjustBalance(req.tgId, -totalReserve);
     } catch (e) {
         return res.status(400).json({ ok: false, error: 'Недостаточно средств на балансе' });
     }
@@ -1106,6 +1115,7 @@ app.post('/api/orders', requireAuth, (req, res) => {
         backdrop_id: backdropId || null,
         symbol_id: symbolId || null,
         max_price: parsedPrice,
+        quantity: parsedQuantity,
     });
 
     // Уведомляем владельцев всех подходящих активных лотов — им кинули
@@ -1128,6 +1138,26 @@ app.get('/api/orders', requireAuth, (req, res) => {
     res.json({ ok: true, orders: listActiveOrdersForUser(req.tgId) });
 });
 
+// === Ордербук по конкретной коллекции — ВСЕ активные ордера всех
+// покупателей (не только свои), опционально суженные по модели/фону/символу.
+// Открывается кнопкой "Смотреть ордера" на Маркете, когда выбрана ровно
+// одна коллекция. Авторизация не обязательна — список публичный, как и сам
+// маркет; фронт сам решает, что показать во вкладке "Мои", сверяя buyer_tg_id
+// с текущим пользователем. ===
+app.get('/api/orders/collection', (req, res) => {
+    const collectionId = parseInt(req.query.collectionId, 10);
+    if (!collectionId) {
+        return res.status(400).json({ ok: false, error: 'Не указана коллекция' });
+    }
+    const orders = listOrdersForCollection({
+        collectionId,
+        modelName: req.query.model || undefined,
+        backdropName: req.query.backdrop || undefined,
+        symbolName: req.query.symbol || undefined,
+    });
+    res.json({ ok: true, orders });
+});
+
 // === История ордеров текущего пользователя (исполненные/отменённые) ===
 app.get('/api/orders/history', requireAuth, (req, res) => {
     res.json({ ok: true, orders: listOrderHistoryForUser(req.tgId) });
@@ -1147,7 +1177,9 @@ app.delete('/api/orders/:id', requireAuth, (req, res) => {
         return res.status(400).json({ ok: false, error: 'Ордер уже неактивен' });
     }
 
-    const user = adjustBalance(req.tgId, order.max_price);
+    const remainingUnits = order.quantity - order.filled_count;
+    const refund = Math.round(order.max_price * remainingUnits * 100) / 100;
+    const user = adjustBalance(req.tgId, refund);
     setOrderStatus(order.id, 'cancelled');
 
     res.json({ ok: true, order: getOrderWithDetails(order.id), balance: user.balance });
@@ -1349,7 +1381,7 @@ app.post('/api/listings/:id/accept-offer', requireAuth, (req, res) => {
     const details = getListingWithDetails(listing.id);
     // Товар переходит покупателю (автору оффера) и оседает в его "Хранилище".
     const soldListing = transferListingToBuyer(listing.id, order.buyer_tg_id);
-    setOrderStatus(order.id, 'filled', listing.id);
+    fillOrderOnce(order.id, listing.id);
     const giftSnapshot = {
         listing_id: listing.id,
         collection_name: details.collection_name,
