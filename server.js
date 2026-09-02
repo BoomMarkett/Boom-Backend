@@ -1363,6 +1363,11 @@ app.post('/api/listings/:id/accept-offer', requireAuth, (req, res) => {
     if (!order || order.status !== 'active') {
         return res.status(400).json({ ok: false, error: 'Это предложение больше недоступно' });
     }
+    // Нельзя продать товар по собственному ордеру — это не настоящая сделка,
+    // а просто перекладывание из одного кармана в другой с потерей на комиссии.
+    if (order.buyer_tg_id === req.tgId) {
+        return res.status(400).json({ ok: false, error: 'Нельзя продать товар по своему же ордеру на покупку' });
+    }
     // Перепроверяем совпадение трейтов на сервере — не доверяем orderId с фронта вслепую.
     if (order.collection_id !== listing.collection_id) {
         return res.status(400).json({ ok: false, error: 'Предложение не подходит под этот лот' });
