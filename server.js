@@ -28,6 +28,7 @@ const {
     findMatchingOrder,
     findMatchingListingsForOrder,
     listOffersForUser,
+    declineOfferAsSeller,
     searchUsersByUsername,
     listOwnedItemsForTgId,
     createTrade,
@@ -1360,6 +1361,30 @@ app.post('/api/listings/:id/accept-offer', requireAuth, (req, res) => {
     );
 
     res.json({ ok: true, listing: soldListing, balance: seller.balance });
+});
+
+// Продавец отклоняет чужое предложение (order) на свой лот — покупателю
+// возвращаются зарезервированные деньги, ордер полностью отменяется (в т.ч.
+// пропадает из "Предложений" у всех остальных продавцов с похожим лотом).
+app.post('/api/listings/:id/decline-offer', requireAuth, (req, res) => {
+    const listingId = parseInt(req.params.id, 10);
+    const orderId = parseInt(req.body.orderId, 10);
+
+    const order = getOrderById(orderId);
+    const result = declineOfferAsSeller(orderId, listingId, req.tgId);
+
+    if (!result.ok) {
+        return res.status(400).json(result);
+    }
+
+    if (order) {
+        notifyTelegram(
+            order.buyer_tg_id,
+            '❌ Ваше предложение на покупку отклонено продавцом. Деньги возвращены на баланс.'
+        );
+    }
+
+    res.json({ ok: true });
 });
 
 // =====================================================================
