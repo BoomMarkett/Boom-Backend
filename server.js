@@ -2,6 +2,9 @@ const express = require('express');
 const crypto = require('crypto');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
+const { TonClient, WalletContractV4, internal } = require('@ton/ton');
+const { mnemonicToPrivateKey } = require('@ton/crypto');
+const { Address, toNano } = require('@ton/core');
 const {
     findOrCreateUser,
     getUserByTgId,
@@ -74,6 +77,73 @@ const TONAPI_BASE = 'https://tonapi.io/v2';
 
 if (!TON_DEPOSIT_ADDRESS) {
     console.warn('⚠️  TON_DEPOSIT_ADDRESS не задан — реальное пополнение будет недоступно!');
+}
+
+// === Реальные TON-выводы ===
+// TON_WITHDRAW_MNEMONIC — 24 слова мнемоники "горячего" кошелька площадки,
+// с которого реально уходят выводы (см. /api/withdraw ниже). Обычно это тот
+// же кошелёк, что принимает депозиты (TON_DEPOSIT_ADDRESS) — тогда все TON
+// пользователей крутятся на одном балансе. TONCENTER_API_KEY — ключ
+// toncenter.com (бесплатно у @tonapibot в Telegram), поднимает лимит запросов;
+// без ключа тоже работает, но легко словить 429 при активном использовании.
+const TON_WITHDRAW_MNEMONIC = process.env.TON_WITHDRAW_MNEMONIC || '';
+const TONCENTER_API_KEY = process.env.TONCENTER_API_KEY || '';
+const TONCENTER_ENDPOINT = 'https://toncenter.com/api/v2/jsonRPC';
+
+if (!TON_WITHDRAW_MNEMONIC) {
+    console.warn('⚠️  TON_WITHDRAW_MNEMONIC не задан — реальный вывод TON будет недоступен!');
+}
+
+// Кошелёк поднимается лениво и один раз на весь процесс (создание TonClient +
+// разбор мнемоники не бесплатны, а withdraw дёргается часто).
+let hotWalletPromise = null;
+function getHotWallet() {
+    if (!hotWalletPromise) {
+        hotWalletPromise = (async () => {
+            const keyPair = await mnemonicToPrivateKey(TON_WITHDRAW_MNEMONIC.trim().split(/\s+/));
+            const client = new TonClient({
+                endpoint: TONCENTER_ENDPOINT,
+                apiKey: TONCENTER_API_KEY || undefined,
+            });
+            const wallet = WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey });
+            const contract = client.open(wallet);
+            return { contract, keyPair };
+        })();
+    }
+    return hotWalletPromise;
+}
+
+/**
+ * Подписывает и реально отправляет TON с горячего кошелька площадки на
+ * адрес пользователя. Ждём роста seqno кошелька как подтверждения, что
+ * сеть приняла транзакцию — сама транзакция уже не отменяется на этом
+ * этапе, а точный час её попадания в блок для UX не критичен.
+ */
+async function sendTonWithdrawal(toAddress, amountTon, commentText) {
+    const { contract, keyPair } = await getHotWallet();
+
+    const seqnoBefore = await contract.getSeqno();
+
+    await contract.sendTransfer({
+        seqno: seqnoBefore,
+        secretKey: keyPair.secretKey,
+        messages: [
+            internal({
+                to: toAddress,
+                value: toNano(amountTon.toFixed(9)),
+                body: commentText || '',
+                bounce: false,
+            }),
+        ],
+    });
+
+    for (let i = 0; i < 20; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const seqnoNow = await contract.getSeqno();
+        if (seqnoNow > seqnoBefore) return;
+    }
+
+    throw new Error('Транзакция отправлена, но подтверждение не пришло вовремя');
 }
 
 /** "Chill Flame #433898" — как называют подарок в самом Telegram. */
@@ -368,20 +438,51 @@ app.get('/api/deposit/:id/status', requireAuth, async (req, res) => {
     }
 });
 
-// === Вывод средств ===
-app.post('/api/withdraw', requireAuth, (req, res) => {
+// === Вывод средств (реальный перевод TON на кошелёк пользователя) ===
+app.post('/api/withdraw', requireAuth, async (req, res) => {
     const amount = parseFloat(req.body.amount);
+    const addressRaw = String(req.body.address || '').trim();
 
     if (!isValidAmount(amount, 0.5, 100000)) {
         return res.status(400).json({ ok: false, error: 'Сумма должна быть от 0.5 до 100000, максимум с одним знаком после запятой' });
     }
+    if (!addressRaw) {
+        return res.status(400).json({ ok: false, error: 'Подключите кошелёк для вывода' });
+    }
+    if (!TON_WITHDRAW_MNEMONIC) {
+        return res.status(503).json({ ok: false, error: 'Вывод временно недоступен, попробуйте позже' });
+    }
+
+    let toAddress;
+    try {
+        toAddress = Address.parse(addressRaw);
+    } catch (e) {
+        return res.status(400).json({ ok: false, error: 'Некорректный адрес кошелька' });
+    }
+
+    // Списываем баланс СРАЗУ, до отправки на блокчейн — иначе повторный
+    // запрос, отправленный за секунду до первого ответа, мог бы списать
+    // ту же сумму дважды. Если сама отправка ниже провалится — вернём
+    // деньги обратно на баланс.
+    let user;
+    try {
+        user = adjustBalance(req.tgId, -amount);
+    } catch (e) {
+        return res.status(400).json({ ok: false, error: e.message });
+    }
 
     try {
-        const user = adjustBalance(req.tgId, -amount);
+        await sendTonWithdrawal(toAddress, amount, 'BoomMarket withdraw');
         createTransaction({ tg_id: req.tgId, type: 'withdraw', amount: -amount });
         res.json({ ok: true, balance: user.balance });
     } catch (e) {
-        res.status(400).json({ ok: false, error: e.message });
+        console.error(`⚠️  Ошибка вывода TON пользователю ${req.tgId}:`, e.message);
+        const restored = adjustBalance(req.tgId, amount);
+        res.status(500).json({
+            ok: false,
+            error: 'Не удалось отправить перевод, средства возвращены на баланс',
+            balance: restored.balance,
+        });
     }
 });
 
