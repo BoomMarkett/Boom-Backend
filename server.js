@@ -287,7 +287,7 @@ app.get('/api/collections/:id/filters', (req, res) => {
 // === Список активных листингов с фильтрами/сортировкой (поддерживает мультивыбор через запятую) ===
 // GET /api/listings?collectionId=1,2&model=Apex,Sigma&backdrop=Satin%20Gold&symbol=Coin&search=Evil&sort=price_asc
 app.get('/api/listings', (req, res) => {
-    const { collectionId, model, backdrop, symbol, search, sort } = req.query;
+    const { collectionId, model, backdrop, symbol, search, sort, ownerTgId } = req.query;
 
     const listings = findListings({
         collectionId: parseCsvIntParam(collectionId),
@@ -296,6 +296,10 @@ app.get('/api/listings', (req, res) => {
         symbolName: parseCsvParam(symbol),
         search: search || undefined,
         sort: sort || undefined,
+        // "Мои лоты" на Маркете — фильтр по владельцу, без отдельной авторизации:
+        // ownerTgId приходит от фронта (currentTgId уже известен клиенту из
+        // Telegram initData), сам список остаётся публичным, как и раньше.
+        ownerTgId: ownerTgId ? parseInt(ownerTgId, 10) : undefined,
     });
 
     res.json({ ok: true, listings });

@@ -498,6 +498,7 @@ function findListings(filters = {}) {
     addFilter('gm.name', filters.modelName, 'modelName');
     addFilter('gb.name', filters.backdropName, 'backdropName');
     addFilter('gs.name', filters.symbolName, 'symbolName');
+    addFilter('l.owner_tg_id', filters.ownerTgId, 'ownerTgId');
 
     if (filters.search) {
         where.push('c.name LIKE @search');
