@@ -19,6 +19,12 @@ const {
     listOwnedItemsForUser,
     createTransaction,
     listTransactionsForUser,
+    createDeposit,
+    getDepositById,
+    getDepositByMemo,
+    getDepositByTxHash,
+    confirmDeposit,
+    expireDeposit,
     createOrder,
     getOrderById,
     getOrderWithDetails,
@@ -55,6 +61,19 @@ if (!BOT_TOKEN) {
 
 if (!JWT_SECRET) {
     console.warn('⚠️  JWT_SECRET не задан — выдача токенов сессии всегда будет отклоняться!');
+}
+
+// === Реальные TON-пополнения ===
+// TON_DEPOSIT_ADDRESS — адрес кошелька площадки, куда пользователи реально
+// присылают TON при пополнении (см. /api/deposit/init и /api/deposit/:id/status
+// ниже). TONAPI_KEY — тот же ключ TonAPI, что и в scripts/seed-collections.js,
+// без него запросы тоже работают, но с более строгим лимитом в минуту.
+const TON_DEPOSIT_ADDRESS = process.env.TON_DEPOSIT_ADDRESS || '';
+const TONAPI_KEY = process.env.TONAPI_KEY || '';
+const TONAPI_BASE = 'https://tonapi.io/v2';
+
+if (!TON_DEPOSIT_ADDRESS) {
+    console.warn('⚠️  TON_DEPOSIT_ADDRESS не задан — реальное пополнение будет недоступно!');
 }
 
 /** "Chill Flame #433898" — как называют подарок в самом Telegram. */
@@ -222,16 +241,131 @@ app.get('/api/balance', requireAuth, (req, res) => {
 // === Пополнение баланса ===
 // ВАЖНО: сейчас это просто прибавляет сумму без проверки реального платежа.
 // Заглушка на время, пока не подключён приём настоящих TON-транзакций.
-app.post('/api/deposit', requireAuth, (req, res) => {
-    const amount = parseFloat(req.body.amount);
+// =====================================================================
+// РЕАЛЬНОЕ ПОПОЛНЕНИЕ БАЛАНСА (настоящий TON, не виртуальные циферки)
+// =====================================================================
+//
+// Схема (классический паттерн "оплата по уникальному комментарию"):
+//   1. Клиент вызывает /api/deposit/init — сервер создаёт заявку на депозит
+//      с уникальным memo (например "BM-7F3K9QXZ") и возвращает адрес
+//      кошелька площадки, куда нужно отправить TON.
+//   2. Клиент через TonConnect отправляет реальную транзакцию с этого
+//      адреса на TON_DEPOSIT_ADDRESS, приложив memo как текстовый комментарий.
+//   3. Клиент опрашивает /api/deposit/:id/status — сервер спрашивает у TonAPI
+//      последние входящие переводы на кошелёк площадки и ищет среди них
+//      перевод с таким же комментарием и суммой не меньше ожидаемой.
+//      Как только находит — начисляет баланс и помечает заявку 'confirmed'.
+//
+// Это НЕ enterprise-grade платёжный процессор (нет вебхуков, нет учёта
+// глубины подтверждения блока), а простое и рабочее решение для маркета
+// такого масштаба — TonAPI отдаёт транзакцию в /events практически сразу
+// после появления в блоке.
+function generateDepositMemo() {
+    // Без символов, которые легко перепутать при ручном вводе (0/O, 1/I).
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let code = '';
+    for (let i = 0; i < 8; i++) {
+        code += alphabet[Math.floor(Math.random() * alphabet.length)];
+    }
+    return `BM-${code}`;
+}
 
-    if (!isValidAmount(amount)) {
+const DEPOSIT_EXPIRY_MINUTES = 45;
+const DEPOSIT_AMOUNT_TOLERANCE_TON = 0.001; // допуск на погрешность округления при сверке сумм
+
+// === Создать заявку на пополнение — возвращает адрес и memo, которые нужно
+// передать в TonConnect-транзакцию на клиенте ===
+app.post('/api/deposit/init', requireAuth, (req, res) => {
+    if (!TON_DEPOSIT_ADDRESS) {
+        return res.status(503).json({ ok: false, error: 'Пополнение временно недоступно — обратитесь в поддержку' });
+    }
+
+    const amount = parseFloat(req.body.amount);
+    if (!isValidAmount(amount, 0.1, 100000)) {
         return res.status(400).json({ ok: false, error: 'Сумма должна быть от 0.1 до 100000, максимум с одним знаком после запятой' });
     }
 
-    const user = adjustBalance(req.tgId, amount);
-    createTransaction({ tg_id: req.tgId, type: 'deposit', amount });
-    res.json({ ok: true, balance: user.balance });
+    let memo = generateDepositMemo();
+    for (let attempt = 0; attempt < 5 && getDepositByMemo(memo); attempt++) {
+        memo = generateDepositMemo();
+    }
+
+    const deposit = createDeposit(req.tgId, amount, memo);
+
+    res.json({
+        ok: true,
+        depositId: deposit.id,
+        memo: deposit.memo,
+        amount: deposit.amount,
+        address: TON_DEPOSIT_ADDRESS,
+    });
+});
+
+// Достаёт последние события кошелька площадки через TonAPI и ищет среди
+// входящих TON-переводов тот, что подходит по memo (точное совпадение
+// комментария) и по сумме (с небольшим допуском на округление).
+async function findTonDepositTransfer(memo, expectedAmount) {
+    const url = `${TONAPI_BASE}/accounts/${TON_DEPOSIT_ADDRESS}/events?limit=30`;
+    const headers = TONAPI_KEY ? { Authorization: `Bearer ${TONAPI_KEY}` } : {};
+    const res = await fetch(url, { headers });
+    if (!res.ok) throw new Error(`TonAPI вернул ${res.status}`);
+    const data = await res.json();
+
+    for (const event of data.events || []) {
+        for (const action of event.actions || []) {
+            if (action.type !== 'TonTransfer' || action.status !== 'ok') continue;
+            const transfer = action.TonTransfer;
+            const comment = transfer?.comment?.trim();
+            if (!comment || comment !== memo) continue;
+
+            const receivedTon = Number(transfer.amount) / 1e9;
+            if (receivedTon + DEPOSIT_AMOUNT_TOLERANCE_TON < expectedAmount) continue;
+
+            return { txHash: event.event_id || null, receivedTon };
+        }
+    }
+    return null;
+}
+
+// === Проверить статус заявки на пополнение — клиент опрашивает этот
+// эндпоинт после отправки транзакции, пока не получит 'confirmed' ===
+app.get('/api/deposit/:id/status', requireAuth, async (req, res) => {
+    const deposit = getDepositById(parseInt(req.params.id, 10));
+    if (!deposit || deposit.tg_id !== req.tgId) {
+        return res.status(404).json({ ok: false, error: 'Заявка на пополнение не найдена' });
+    }
+
+    if (deposit.status !== 'pending') {
+        const user = getUserByTgId(req.tgId);
+        return res.json({ ok: true, status: deposit.status, balance: user.balance });
+    }
+
+    const ageMinutes = (Date.now() - new Date(`${deposit.created_at}Z`).getTime()) / 60000;
+    if (ageMinutes > DEPOSIT_EXPIRY_MINUTES) {
+        expireDeposit(deposit.id);
+        return res.json({ ok: true, status: 'expired' });
+    }
+
+    try {
+        const match = await findTonDepositTransfer(deposit.memo, deposit.amount);
+        if (!match) {
+            return res.json({ ok: true, status: 'pending' });
+        }
+        if (match.txHash && getDepositByTxHash(match.txHash)) {
+            // Эта транзакция уже была засчитана за другой депозит — не начисляем повторно.
+            return res.json({ ok: true, status: 'pending' });
+        }
+
+        confirmDeposit(deposit.id, match.txHash || `memo:${deposit.memo}:${Date.now()}`);
+        const user = adjustBalance(req.tgId, deposit.amount);
+        createTransaction({ tg_id: req.tgId, type: 'deposit', amount: deposit.amount });
+
+        res.json({ ok: true, status: 'confirmed', balance: user.balance });
+    } catch (e) {
+        console.error('Ошибка проверки пополнения через TonAPI:', e);
+        // Не показываем пользователю техническую ошибку — просто продолжаем поллинг.
+        res.json({ ok: true, status: 'pending' });
+    }
 });
 
 // === Вывод средств ===

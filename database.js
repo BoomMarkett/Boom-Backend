@@ -177,6 +177,25 @@ db.exec(`
     CREATE INDEX IF NOT EXISTS idx_trades_recipient ON trades(recipient_tg_id, status);
     CREATE INDEX IF NOT EXISTS idx_trades_initiator ON trades(initiator_tg_id, status);
     CREATE INDEX IF NOT EXISTS idx_trade_items_trade ON trade_items(trade_id);
+
+    -- Реальные TON-пополнения. Каждая заявка на пополнение получает уникальный
+    -- memo (комментарий) — пользователь отправляет TON на кошелёк площадки
+    -- именно с этим комментарием, а сервер сверяет входящие переводы через
+    -- TonAPI по memo+сумме и только тогда зачисляет баланс (см. server.js,
+    -- /api/deposit/init и /api/deposit/:id/status). tx_hash уникален, чтобы
+    -- одна и та же ончейн-транзакция не могла зачислить баланс дважды.
+    CREATE TABLE IF NOT EXISTS deposits (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tg_id INTEGER NOT NULL REFERENCES users(tg_id),
+        amount REAL NOT NULL,
+        memo TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL DEFAULT 'pending', -- pending | confirmed | expired
+        tx_hash TEXT UNIQUE,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        confirmed_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_deposits_tg_id ON deposits(tg_id, status);
 `);
 
 // === Миграция: добавляем новые колонки в уже существующую базу ===
@@ -584,6 +603,43 @@ function createTransaction(data) {
 
 function listTransactionsForUser(tgId) {
     return transactionStatements.listByUser.all(tgId);
+}
+
+// === Подготовленные запросы: реальные TON-пополнения ===
+const depositStatements = {
+    insert: db.prepare('INSERT INTO deposits (tg_id, amount, memo) VALUES (?, ?, ?)'),
+    findById: db.prepare('SELECT * FROM deposits WHERE id = ?'),
+    findByMemo: db.prepare('SELECT * FROM deposits WHERE memo = ?'),
+    findByTxHash: db.prepare('SELECT * FROM deposits WHERE tx_hash = ?'),
+    confirm: db.prepare(`UPDATE deposits SET status = 'confirmed', tx_hash = ?, confirmed_at = datetime('now') WHERE id = ?`),
+    expire: db.prepare(`UPDATE deposits SET status = 'expired' WHERE id = ?`),
+};
+
+function createDeposit(tgId, amount, memo) {
+    const info = depositStatements.insert.run(tgId, amount, memo);
+    return depositStatements.findById.get(info.lastInsertRowid);
+}
+
+function getDepositById(id) {
+    return depositStatements.findById.get(id);
+}
+
+function getDepositByMemo(memo) {
+    return depositStatements.findByMemo.get(memo);
+}
+
+function getDepositByTxHash(txHash) {
+    return depositStatements.findByTxHash.get(txHash);
+}
+
+function confirmDeposit(id, txHash) {
+    depositStatements.confirm.run(txHash, id);
+    return getDepositById(id);
+}
+
+function expireDeposit(id) {
+    depositStatements.expire.run(id);
+    return getDepositById(id);
 }
 
 // === Подготовленные запросы: ордера на покупку ===
@@ -1165,6 +1221,12 @@ module.exports = {
     listOwnedItemsForUser,
     createTransaction,
     listTransactionsForUser,
+    createDeposit,
+    getDepositById,
+    getDepositByMemo,
+    getDepositByTxHash,
+    confirmDeposit,
+    expireDeposit,
     createOrder,
     hasOwnMatchingListing,
     getOrderById,
