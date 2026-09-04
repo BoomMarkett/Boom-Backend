@@ -2,7 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
-const { TonClient, WalletContractV4, internal } = require('@ton/ton');
+const { TonClient, WalletContractV3R2, WalletContractV4, WalletContractV5R1, internal } = require('@ton/ton');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
 const { Address, toNano } = require('@ton/core');
 const {
@@ -104,6 +104,21 @@ if (!TON_WITHDRAW_MNEMONIC) {
     console.warn('⚠️  TON_WITHDRAW_MNEMONIC не задан — реальный вывод TON будет недоступен!');
 }
 
+// TON_WITHDRAW_WALLET_VERSION — версия контракта кошелька выплат: 'v3r2' |
+// 'v4' (по умолчанию) | 'v5r1'. Из ОДНОЙ И ТОЙ ЖЕ сид-фразы разные версии
+// кошелька дают РАЗНЫЕ адреса — если сервер вычисляет не тот адрес, что вы
+// видите у себя в кошельке (Tonkeeper и т.п.), значит версия указана неверно.
+// Смотрите лог "Горячий кошелёк для выводов" при старте — там же выводятся
+// адреса всех версий сразу, чтобы можно было найти совпадение с вашим
+// реальным кошельком и, если нужно, поправить эту переменную.
+const TON_WITHDRAW_WALLET_VERSION = (process.env.TON_WITHDRAW_WALLET_VERSION || 'v4').toLowerCase();
+
+function walletContractClassFor(version) {
+    if (version === 'v3r2') return WalletContractV3R2;
+    if (version === 'v5r1') return WalletContractV5R1;
+    return WalletContractV4;
+}
+
 // Кошелёк поднимается лениво и один раз на весь процесс (создание TonClient +
 // разбор мнемоники не бесплатны, а withdraw дёргается часто).
 let hotWalletPromise = null;
@@ -115,14 +130,40 @@ function getHotWallet() {
                 endpoint: TONCENTER_ENDPOINT,
                 apiKey: TONCENTER_API_KEY || undefined,
             });
-            const wallet = WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey });
+
+            // Диагностика: печатаем адрес для КАЖДОЙ поддерживаемой версии из этой
+            // же мнемоники — так сразу видно, какая версия совпадает с реальным
+            // кошельком, если используемая по умолчанию (или заданная в env) не та.
+            try {
+                const candidates = [
+                    ['v3r2', WalletContractV3R2],
+                    ['v4', WalletContractV4],
+                    ['v5r1', WalletContractV5R1],
+                ];
+                console.log('🔎 Адреса горячего кошелька по версиям контракта (для сверки с реальным кошельком):');
+                candidates.forEach(([label, WalletClass]) => {
+                    try {
+                        const addr = WalletClass.create({ workchain: 0, publicKey: keyPair.publicKey }).address.toString({ bounceable: false });
+                        const mark = label === TON_WITHDRAW_WALLET_VERSION ? '  ← сейчас используется' : '';
+                        console.log(`   ${label}: ${addr}${mark}`);
+                    } catch (e) {
+                        console.log(`   ${label}: не удалось вычислить (${e.message})`);
+                    }
+                });
+            } catch (e) {
+                // Диагностика не должна ронять инициализацию кошелька, даже если сама сломалась.
+            }
+
+            const WalletClass = walletContractClassFor(TON_WITHDRAW_WALLET_VERSION);
+            const wallet = WalletClass.create({ workchain: 0, publicKey: keyPair.publicKey });
             const contract = client.open(wallet);
             // Печатаем адрес горячего кошелька один раз при первом использовании —
             // без этого невозможно проверить в эксплорере (tonviewer.com/tonscan.org),
             // есть ли на нём вообще TON для покрытия выводов и комиссии сети.
             // Самая частая причина "Не удалось отправить перевод": на этом
-            // адресе просто не хватает TON.
-            console.log(`💼 Горячий кошелёк для выводов: ${wallet.address.toString({ bounceable: false })}`);
+            // адресе просто не хватает TON (или используется не та версия кошелька,
+            // см. диагностику по версиям выше).
+            console.log(`💼 Горячий кошелёк для выводов (версия ${TON_WITHDRAW_WALLET_VERSION}): ${wallet.address.toString({ bounceable: false })}`);
             return { client, contract, keyPair, address: wallet.address };
         })().catch((e) => {
             // Если инициализация (разбор мнемоники и т.п.) провалилась — не
