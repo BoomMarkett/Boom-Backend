@@ -297,6 +297,20 @@ const TOKEN_LIFETIME = '24h';
 // условие обычно уже выполнено — авторизация в Mini App идёт через него).
 // =====================================================================
 const TELEGRAM_API_BASE = `https://api.telegram.org/bot${BOT_TOKEN}`;
+
+// Публичный юзернейм личного аккаунта, подключённого как Telegram Business
+// (см. блок "ПРИЁМ ПОДАРКОВ-NFT" ниже) — именно ему пользователи реально
+// присылают NFT-подарки, чтобы они зачислились в Хранилище. Используется
+// только для ссылки "Открыть чат" в модалке депозита на фронте, ничего
+// секретного тут нет — юзернейм и так виден всем в самом Telegram.
+const BUSINESS_ACCOUNT_USERNAME = process.env.BUSINESS_ACCOUNT_USERNAME || '';
+if (!BUSINESS_ACCOUNT_USERNAME) {
+    console.warn('⚠️  BUSINESS_ACCOUNT_USERNAME не задан — кнопка "Добавить NFT" не сможет открыть чат для отправки подарка!');
+}
+
+app.get('/api/deposit-nft-info', (req, res) => {
+    res.json({ ok: true, username: BUSINESS_ACCOUNT_USERNAME });
+});
 // URL мини-приложения — тот же, что в tonconnect-manifest.json.
 const MINI_APP_URL = process.env.MINI_APP_URL || 'https://holdenholden72-dotcom.github.io/BoomMarket/';
 
@@ -886,29 +900,12 @@ app.post('/api/listings', requireAuth, (req, res) => {
     res.json({ ok: true, listing });
 });
 
-// === Добавить NFT сразу в личное "Хранилище" (без выставления на маркет,
-// цена не требуется — товар просто становится собственностью пользователя) ===
-app.post('/api/inventory/add', requireAuth, (req, res) => {
-    const { collectionId, modelId, backdropId, symbolId, giftNumber, nftAddress } = req.body;
-
-    if (!collectionId || !modelId || !backdropId || !symbolId || !giftNumber) {
-        return res.status(400).json({ ok: false, error: 'Заполнены не все обязательные поля' });
-    }
-
-    const listing = createListing({
-        owner_tg_id: req.tgId,
-        collection_id: collectionId,
-        model_id: modelId,
-        backdrop_id: backdropId,
-        symbol_id: symbolId,
-        gift_number: giftNumber,
-        nft_address: nftAddress || null,
-        price: 0,
-        status: 'owned',
-    });
-
-    res.json({ ok: true, listing });
-});
+// NB: раньше здесь был POST /api/inventory/add — форма, где NFT добавлялся
+// в Хранилище просто по введённым вручную названиям (без всякой проверки
+// владения). Это позволяло любому нарисовать себе сколько угодно "подарков"
+// и тут же продать их за реальный TON — критическая дыра. Единственный
+// настоящий способ зачисления NFT теперь — раздел "ПРИЁМ ПОДАРКОВ-NFT"
+// ниже (реальный подарок в Telegram → вебхук → creditIncomingGift).
 
 // =====================================================================
 // ВЫВОД ПОДАРКА-NFT ОБРАТНО В TELEGRAM (Business API)
