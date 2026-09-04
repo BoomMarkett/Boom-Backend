@@ -918,7 +918,7 @@ app.post('/api/inventory/:id/withdraw-gift', requireAuth, async (req, res) => {
 // (слоты, рулетка, бомбер, башня, кости, плинко). Считается от суммы
 // выигрыша (не от ставки и не при проигрыше), округляется до копеек так же,
 // как и сам выигрыш.
-const GAME_WIN_FEE_PERCENT = 0.01;
+const GAME_WIN_FEE_PERCENT = 0.1;
 
 function applyGameWinFee(rawWinAmount) {
     if (!rawWinAmount) return rawWinAmount;
