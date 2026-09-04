@@ -117,8 +117,21 @@ function getHotWallet() {
             });
             const wallet = WalletContractV4.create({ workchain: 0, publicKey: keyPair.publicKey });
             const contract = client.open(wallet);
-            return { contract, keyPair };
-        })();
+            // Печатаем адрес горячего кошелька один раз при первом использовании —
+            // без этого невозможно проверить в эксплорере (tonviewer.com/tonscan.org),
+            // есть ли на нём вообще TON для покрытия выводов и комиссии сети.
+            // Самая частая причина "Не удалось отправить перевод": на этом
+            // адресе просто не хватает TON.
+            console.log(`💼 Горячий кошелёк для выводов: ${wallet.address.toString({ bounceable: false })}`);
+            return { client, contract, keyPair, address: wallet.address };
+        })().catch((e) => {
+            // Если инициализация (разбор мнемоники и т.п.) провалилась — не
+            // кэшируем сломанный промис навсегда, иначе КАЖДЫЙ следующий вывод
+            // будет падать с той же ошибкой без единого шанса на повтор после
+            // исправления переменных окружения.
+            hotWalletPromise = null;
+            throw e;
+        });
     }
     return hotWalletPromise;
 }
@@ -130,7 +143,20 @@ function getHotWallet() {
  * этапе, а точный час её попадания в блок для UX не критичен.
  */
 async function sendTonWithdrawal(toAddress, amountTon, commentText) {
-    const { contract, keyPair } = await getHotWallet();
+    const { client, contract, keyPair, address } = await getHotWallet();
+
+    // Проверяем баланс горячего кошелька ДО отправки — иначе при нехватке
+    // TON транзакция просто не подтвердится в сети, и мы 40 секунд впустую
+    // прождём таймаут ("Транзакция отправлена, но подтверждение не пришло
+    // вовремя"), вместо понятной причины сразу.
+    const walletBalanceNano = await client.getBalance(address);
+    const requiredNano = toNano(amountTon.toFixed(9)) + toNano('0.05'); // + запас на комиссию сети
+    if (walletBalanceNano < requiredNano) {
+        throw new Error(
+            `На горячем кошельке площадки недостаточно TON для вывода (нужно ~${amountTon} + комиссия, ` +
+            `на кошельке ${(Number(walletBalanceNano) / 1e9).toFixed(4)} TON) — пополните горячий кошелёк`
+        );
+    }
 
     const seqnoBefore = await contract.getSeqno();
 
@@ -629,7 +655,8 @@ app.post('/api/withdraw', requireAuth, async (req, res) => {
         createTransaction({ tg_id: req.tgId, type: 'withdraw', amount: -amount });
         res.json({ ok: true, balance: user.balance });
     } catch (e) {
-        console.error(`⚠️  Ошибка вывода TON пользователю ${req.tgId}:`, e.message);
+        console.error(`⚠️  Ошибка вывода TON пользователю ${req.tgId} (сумма ${amount}, адрес ${addressRaw}):`, e.message);
+        console.error(e.stack);
         const restored = adjustBalance(req.tgId, amount);
         res.status(500).json({
             ok: false,
@@ -918,24 +945,11 @@ app.post('/api/inventory/:id/withdraw-gift', requireAuth, async (req, res) => {
 // (слоты, рулетка, бомбер, башня, кости, плинко). Считается от суммы
 // выигрыша (не от ставки и не при проигрыше), округляется до копеек так же,
 // как и сам выигрыш.
-const GAME_WIN_FEE_PERCENT = 0.1;
+const GAME_WIN_FEE_PERCENT = 0.01;
 
 function applyGameWinFee(rawWinAmount) {
     if (!rawWinAmount) return rawWinAmount;
     return Math.round(rawWinAmount * (1 - GAME_WIN_FEE_PERCENT / 100) * 100) / 100;
-}
-
-// Проверяет, что на балансе хватает именно на ставку — ДО розыгрыша.
-// Важно делать эту проверку отдельно, а не полагаться на итоговую проверку
-// внутри adjustBalance(tgId, winAmount - bet): при выигрыше netDelta часто
-// положительный (выигрыш больше ставки), и adjustBalance пропустит игрока,
-// даже если у него изначально не хватало денег на саму ставку — из-за этого
-// можно было играть с недостаточным балансом и получать выигрыш.
-function requireSufficientBalance(tgId, bet) {
-    const user = getUserByTgId(tgId);
-    if (!user || user.balance < bet) {
-        throw new Error('Недостаточно средств на балансе');
-    }
 }
 
 // Символы барабана и их "вес" — насколько часто они выпадают на одном
@@ -971,11 +985,6 @@ app.post('/api/games/slots/spin', requireAuth, (req, res) => {
             ok: false,
             error: `Ставка должна быть от ${SLOTS_MIN_BET} до ${SLOTS_MAX_BET} TON, максимум с одним знаком после запятой`,
         });
-    }
-    try {
-        requireSufficientBalance(req.tgId, bet);
-    } catch (e) {
-        return res.status(400).json({ ok: false, error: e.message });
     }
 
     const reels = [spinReel(), spinReel(), spinReel()];
@@ -1049,11 +1058,6 @@ app.post('/api/games/roulette/spin', requireAuth, (req, res) => {
             ok: false,
             error: `Ставка должна быть от ${ROULETTE_MIN_BET} до ${ROULETTE_MAX_BET} TON, максимум с одним знаком после запятой`,
         });
-    }
-    try {
-        requireSufficientBalance(req.tgId, bet);
-    } catch (e) {
-        return res.status(400).json({ ok: false, error: e.message });
     }
 
     const segment = spinRoulette();
@@ -1501,11 +1505,6 @@ app.post('/api/games/dice/roll', requireAuth, (req, res) => {
     if (!Number.isInteger(number) || number < 1 || number > 6) {
         return res.status(400).json({ ok: false, error: 'Число должно быть от 1 до 6' });
     }
-    try {
-        requireSufficientBalance(req.tgId, bet);
-    } catch (e) {
-        return res.status(400).json({ ok: false, error: e.message });
-    }
 
     // Бросок — случайное число от 1 до 6.
     const roll = 1 + Math.floor(Math.random() * 6);
@@ -1600,11 +1599,6 @@ app.post('/api/games/plinko/drop', requireAuth, (req, res) => {
             ok: false,
             error: `Ставка должна быть от ${PLINKO_MIN_BET} до ${PLINKO_MAX_BET} TON, максимум с одним знаком после запятой`,
         });
-    }
-    try {
-        requireSufficientBalance(req.tgId, bet);
-    } catch (e) {
-        return res.status(400).json({ ok: false, error: e.message });
     }
 
     const slotIndex = plinkoPickBinIndex();
