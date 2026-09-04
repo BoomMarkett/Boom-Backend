@@ -371,15 +371,20 @@ async function notifyTelegram(tgId, text, photoUrl) {
 const TELEGRAM_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || '';
 
 app.post('/api/telegram/webhook', async (req, res) => {
-    // Секрет обязателен: без него любой в интернете мог бы слать сюда
-    // поддельные апдейты и зачислять себе чужие подарки.
-    if (TELEGRAM_WEBHOOK_SECRET) {
-        const gotSecret = req.headers['x-telegram-bot-api-secret-token'];
-        if (gotSecret !== TELEGRAM_WEBHOOK_SECRET) {
-            return res.sendStatus(401);
-        }
-    } else {
-        console.warn('⚠️  TELEGRAM_WEBHOOK_SECRET не задан — вебхук принимает запросы без проверки подлинности!');
+    // Секрет ОБЯЗАТЕЛЕН: без него любой в интернете мог бы слать сюда
+    // поддельные апдейты и зачислять себе чужие подарки. Раньше при
+    // отсутствии TELEGRAM_WEBHOOK_SECRET проверка просто пропускалась
+    // (fail-open) — это позволяло полностью анонимно накручивать себе
+    // фейковые депозиты подарков. Теперь при отсутствии/неверном секрете
+    // эндпоинт всегда отказывает (fail-closed), а не тихо деградирует.
+    if (!TELEGRAM_WEBHOOK_SECRET) {
+        console.error('⛔ TELEGRAM_WEBHOOK_SECRET не задан — вебхук отклоняет ВСЕ запросы, пока секрет не настроен.');
+        return res.sendStatus(500);
+    }
+
+    const gotSecret = req.headers['x-telegram-bot-api-secret-token'];
+    if (!isSecretMatch(gotSecret, TELEGRAM_WEBHOOK_SECRET)) {
+        return res.sendStatus(401);
     }
 
     // Telegram не ждёт от нас содержательного ответа и не разбирает тело —
@@ -500,6 +505,21 @@ function isValidAmount(amount, min = 0.1, max = 100000) {
     if (amount < min || amount > max) return false;
     const tenths = Math.round(amount * 10);
     return Math.abs(tenths - amount * 10) < 1e-6;
+}
+
+// Сравнение секретов постоянным временем — обычное === "утекает" через
+// время выполнения (сколько символов совпало до первого расхождения),
+// что теоретически позволяет подобрать секрет по времени ответа. Здесь
+// это не бог весть какой большой риск (секрет длинный и меняется редко),
+// но раз уж переписываем проверку вебхука — сделаем как положено.
+function isSecretMatch(received, expected) {
+    if (typeof received !== 'string' || !expected) return false;
+    const a = Buffer.from(received);
+    const b = Buffer.from(expected);
+    // timingSafeEqual требует буферы одинаковой длины — иначе сам бросит
+    // исключение, а разная длина уже сама по себе "не совпало".
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
 }
 
 function checkTelegramAuth(initData) {
