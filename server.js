@@ -49,6 +49,14 @@ const {
     acceptTrade,
     declineTrade,
     cancelTrade,
+    upsertModel,
+    upsertBackdrop,
+    upsertSymbol,
+    findOrCreateCollectionByName,
+    saveBusinessConnection,
+    getActiveBusinessConnection,
+    isGiftAlreadyDeposited,
+    recordGiftDeposit,
 } = require('./database');
 
 const app = express();
@@ -199,6 +207,149 @@ async function notifyTelegram(tgId, text, photoUrl) {
     } catch (e) {
         console.error(`⚠️  Ошибка отправки Telegram-уведомления пользователю ${tgId}:`, e.message);
     }
+}
+
+// =====================================================================
+// ПРИЁМ ПОДАРКОВ-NFT ИЗ TELEGRAM (Business API)
+//
+// Личный Telegram-аккаунт, на который люди присылают подарки, подключён
+// как Telegram Business с этим ботом (Settings → Telegram Business →
+// Chatbots), боту выдано право "Просмотр подарков и звёзд"
+// (can_view_gifts_and_stars). Когда кто-то дарит подарок этому аккаунту,
+// в чате с отправителем появляется служебное сообщение — Telegram доставляет
+// его боту как апдейт update.business_message, точно так же, как обычное
+// сообщение в подключённом чате.
+//
+// ВАЖНО: чтобы это вообще заработало, у бота должен быть настроен вебхук
+// (setWebhook на этот URL) — без него апдейты не придут ни через getUpdates
+// по умолчанию (business-апдейты идут только туда, куда подписались), ни
+// тем более сюда. Секрет (TELEGRAM_WEBHOOK_SECRET) сверяется с заголовком
+// X-Telegram-Bot-Api-Secret-Token — так сюда не сможет достучаться никто,
+// кроме самого Telegram.
+// =====================================================================
+const TELEGRAM_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || '';
+
+app.post('/api/telegram/webhook', async (req, res) => {
+    // Секрет обязателен: без него любой в интернете мог бы слать сюда
+    // поддельные апдейты и зачислять себе чужие подарки.
+    if (TELEGRAM_WEBHOOK_SECRET) {
+        const gotSecret = req.headers['x-telegram-bot-api-secret-token'];
+        if (gotSecret !== TELEGRAM_WEBHOOK_SECRET) {
+            return res.sendStatus(401);
+        }
+    } else {
+        console.warn('⚠️  TELEGRAM_WEBHOOK_SECRET не задан — вебхук принимает запросы без проверки подлинности!');
+    }
+
+    // Telegram не ждёт от нас содержательного ответа и не разбирает тело —
+    // важно только быстро ответить 200, иначе он будет повторять апдейт.
+    // Всю обработку делаем уже после отправки ответа.
+    res.sendStatus(200);
+
+    try {
+        await handleTelegramUpdate(req.body);
+    } catch (e) {
+        console.error('⚠️  Ошибка обработки Telegram-апдейта:', e);
+    }
+});
+
+async function handleTelegramUpdate(update) {
+    if (!update) return;
+
+    // Бот подключили/отключили/переподключили к Business-аккаунту —
+    // запоминаем connection_id (пригодится позже для вывода подарков обратно
+    // через transferGift) и сам факт подключения.
+    if (update.business_connection) {
+        const conn = update.business_connection;
+        saveBusinessConnection(conn.id, conn.user && conn.user.id, conn.is_enabled);
+        console.log(`ℹ️  Business-подключение обновлено: ${conn.id}, аккаунт ${conn.user?.id}, включено: ${conn.is_enabled}`);
+        return;
+    }
+
+    // Новое сообщение в чате, куда подключён business-бот. Нас интересует
+    // только случай "кто-то подарил NFT-подарок этому аккаунту".
+    const message = update.business_message;
+    if (!message || !message.unique_gift) return;
+
+    await creditIncomingGift(message);
+}
+
+/**
+ * Заводит депонированный подарок в инвентарь ("Хранилище") приславшего
+ * его пользователя. Идемпотентно — по owned_gift_id: при повторной
+ * доставке того же апдейта Telegram (это штатное поведение вебхуков)
+ * подарок не зачислится дважды.
+ */
+async function creditIncomingGift(message) {
+    const sender = message.from;
+    const giftInfo = message.unique_gift; // UniqueGiftInfo
+    const gift = giftInfo.gift; // UniqueGift: base_name, name, number, model, symbol, backdrop
+
+    if (!sender || !gift) return;
+
+    // owned_gift_id есть только у сообщений, которые Telegram доставляет
+    // именно управляемому business-аккаунту — то, что нам и нужно. Если
+    // его нет, значит это сообщение не про "нам подарили", пропускаем.
+    const ownedGiftId = giftInfo.owned_gift_id || gift.name;
+    if (isGiftAlreadyDeposited(ownedGiftId)) {
+        console.log(`ℹ️  Подарок ${ownedGiftId} уже был зачислен ранее, пропускаю повтор.`);
+        return;
+    }
+
+    // Коллекция матчится по названию (base_name) — TON-адреса тут нет,
+    // Telegram отдаёт только человекочитаемое имя. Если такой коллекции
+    // ещё нет в каталоге — заводим новую (без ton_address).
+    const collection = findOrCreateCollectionByName(gift.base_name, null);
+
+    const modelId = upsertModel(
+        collection.id,
+        gift.model?.name || 'Unknown',
+        gift.model?.rarity_per_mille ?? null,
+        null
+    );
+    const backdropId = upsertBackdrop(
+        collection.id,
+        gift.backdrop?.name || 'Unknown',
+        gift.backdrop?.colors?.center_color
+            ? `#${gift.backdrop.colors.center_color.toString(16).padStart(6, '0')}`
+            : null,
+        gift.backdrop?.rarity_per_mille ?? null,
+        null
+    );
+    const symbolId = upsertSymbol(
+        collection.id,
+        gift.symbol?.name || 'Unknown',
+        null,
+        gift.symbol?.rarity_per_mille ?? null
+    );
+
+    const depositUser = findOrCreateUser({
+        id: sender.id,
+        username: sender.username,
+        first_name: sender.first_name,
+        last_name: sender.last_name,
+    });
+
+    const listing = createListing({
+        owner_tg_id: depositUser.tg_id,
+        collection_id: collection.id,
+        model_id: modelId,
+        backdrop_id: backdropId,
+        symbol_id: symbolId,
+        gift_number: gift.number,
+        nft_address: null, // Telegram не отдаёт TON-адрес самого NFT-айтема
+        price: 0,
+        status: 'owned',
+    });
+
+    recordGiftDeposit(ownedGiftId, depositUser.tg_id, listing.id);
+
+    console.log(`✅ Зачислен подарок "${gift.base_name} #${gift.number}" пользователю ${depositUser.tg_id}`);
+
+    await notifyTelegram(
+        depositUser.tg_id,
+        `🎁 Ваш подарок <b>${gift.base_name} #${gift.number}</b> зачислен в Хранилище BoomMarket!`
+    );
 }
 
 // Проверяет, что сумма — число в заданном диапазоне с не более чем одним

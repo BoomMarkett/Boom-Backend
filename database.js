@@ -196,6 +196,30 @@ db.exec(`
     );
 
     CREATE INDEX IF NOT EXISTS idx_deposits_tg_id ON deposits(tg_id, status);
+
+    -- Business-подключение бота к личному Telegram-аккаунту, на который люди
+    -- присылают подарки. connection_id нужен, чтобы позже вызывать
+    -- getBusinessAccountGifts / transferGift от имени этого аккаунта.
+    -- Храним только последнее активное подключение (business_account_tg_id
+    -- меняется, только если переподключить бота к другому аккаунту).
+    CREATE TABLE IF NOT EXISTS business_connections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        connection_id TEXT NOT NULL UNIQUE,
+        business_account_tg_id INTEGER,
+        is_enabled INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Подарки, уже зачисленные пользователю в инвентарь — по owned_gift_id
+    -- Telegram (уникален на аккаунт). Без этого при повторном апдейте/сбое
+    -- вебхука один и тот же подарок мог бы начислиться дважды.
+    CREATE TABLE IF NOT EXISTS gift_deposits (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        owned_gift_id TEXT NOT NULL UNIQUE,
+        tg_id INTEGER NOT NULL REFERENCES users(tg_id),
+        listing_id INTEGER REFERENCES listings(id),
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
 `);
 
 // === Миграция: добавляем новые колонки в уже существующую базу ===
@@ -284,6 +308,10 @@ const catalogStatements = {
         ON CONFLICT(ton_address) DO UPDATE SET name = excluded.name, image_url = excluded.image_url
     `),
     findCollectionByAddress: db.prepare('SELECT * FROM collections WHERE ton_address = ?'),
+    findCollectionByName: db.prepare('SELECT * FROM collections WHERE name = ?'),
+    insertCollectionByName: db.prepare(`
+        INSERT INTO collections (ton_address, name, image_url) VALUES (NULL, @name, @image_url)
+    `),
     listCollections: db.prepare('SELECT * FROM collections ORDER BY name'),
 
     upsertModel: db.prepare(`
@@ -305,6 +333,9 @@ const catalogStatements = {
         VALUES (@collection_id, @name, @icon_url, @rarity_permille)
         ON CONFLICT(collection_id, name) DO UPDATE SET rarity_permille = excluded.rarity_permille
     `),
+    findModelId: db.prepare('SELECT id FROM gift_models WHERE collection_id = ? AND name = ?'),
+    findBackdropId: db.prepare('SELECT id FROM gift_backdrops WHERE collection_id = ? AND name = ?'),
+    findSymbolId: db.prepare('SELECT id FROM gift_symbols WHERE collection_id = ? AND name = ?'),
 
     modelsByCollection: db.prepare('SELECT id, collection_id, name, image_url, ROUND(rarity_permille / 10.0, 2) AS rarity_permille FROM gift_models WHERE collection_id = ? ORDER BY name'),
     backdropsByCollection: db.prepare('SELECT id, collection_id, name, color_hex, image_url, ROUND(rarity_permille / 10.0, 2) AS rarity_permille FROM gift_backdrops WHERE collection_id = ? ORDER BY name'),
@@ -332,20 +363,42 @@ function upsertCollection({ ton_address, name, image_url }) {
     return catalogStatements.findCollectionByAddress.get(ton_address);
 }
 
+function findCollectionByName(name) {
+    return catalogStatements.findCollectionByName.get(name);
+}
+
+/**
+ * Находит коллекцию по названию (как оно приходит от Telegram в подарке —
+ * base_name) либо заводит новую запись без ton_address, если такой коллекции
+ * в каталоге ещё нет. В отличие от upsertCollection (ключ — ton_address),
+ * тут ключ — само название, потому что при депозите подарка из Telegram
+ * TON-адрес коллекции нам не известен.
+ */
+function findOrCreateCollectionByName(name, image_url) {
+    const existing = catalogStatements.findCollectionByName.get(name);
+    if (existing) return existing;
+
+    catalogStatements.insertCollectionByName.run({ name, image_url: image_url || null });
+    return catalogStatements.findCollectionByName.get(name);
+}
+
 function listCollections() {
     return catalogStatements.listCollections.all();
 }
 
 function upsertModel(collection_id, name, rarity_permille, image_url) {
     catalogStatements.upsertModel.run({ collection_id, name, rarity_permille: rarity_permille ?? null, image_url: image_url || null });
+    return catalogStatements.findModelId.get(collection_id, name).id;
 }
 
 function upsertBackdrop(collection_id, name, color_hex, rarity_permille, image_url) {
     catalogStatements.upsertBackdrop.run({ collection_id, name, color_hex: color_hex || null, rarity_permille: rarity_permille ?? null, image_url: image_url || null });
+    return catalogStatements.findBackdropId.get(collection_id, name).id;
 }
 
 function upsertSymbol(collection_id, name, icon_url, rarity_permille) {
     catalogStatements.upsertSymbol.run({ collection_id, name, icon_url: icon_url || null, rarity_permille: rarity_permille ?? null });
+    return catalogStatements.findSymbolId.get(collection_id, name).id;
 }
 
 function getFiltersForCollection(collection_id) {
@@ -1197,6 +1250,50 @@ function cancelTrade(tradeId, actingTgId) {
     return { ok: true, trade: getTradeWithItems(tradeId) };
 }
 
+// === Business-подключение бота (для приёма подарков-NFT из Telegram) ===
+const businessConnectionStatements = {
+    upsert: db.prepare(`
+        INSERT INTO business_connections (connection_id, business_account_tg_id, is_enabled, updated_at)
+        VALUES (@connection_id, @business_account_tg_id, @is_enabled, datetime('now'))
+        ON CONFLICT(connection_id) DO UPDATE SET
+            business_account_tg_id = excluded.business_account_tg_id,
+            is_enabled = excluded.is_enabled,
+            updated_at = datetime('now')
+    `),
+    // Активных подключений в норме одно — берём самое свежее из включённых.
+    findActive: db.prepare(`
+        SELECT * FROM business_connections WHERE is_enabled = 1 ORDER BY updated_at DESC LIMIT 1
+    `),
+};
+
+function saveBusinessConnection(connectionId, businessAccountTgId, isEnabled) {
+    businessConnectionStatements.upsert.run({
+        connection_id: connectionId,
+        business_account_tg_id: businessAccountTgId || null,
+        is_enabled: isEnabled ? 1 : 0,
+    });
+}
+
+function getActiveBusinessConnection() {
+    return businessConnectionStatements.findActive.get();
+}
+
+// === Учёт зачисленных подарков-NFT (идемпотентность вебхука) ===
+const giftDepositStatements = {
+    insert: db.prepare(`
+        INSERT INTO gift_deposits (owned_gift_id, tg_id, listing_id) VALUES (@owned_gift_id, @tg_id, @listing_id)
+    `),
+    findByOwnedGiftId: db.prepare('SELECT * FROM gift_deposits WHERE owned_gift_id = ?'),
+};
+
+function isGiftAlreadyDeposited(ownedGiftId) {
+    return !!giftDepositStatements.findByOwnedGiftId.get(ownedGiftId);
+}
+
+function recordGiftDeposit(ownedGiftId, tgId, listingId) {
+    giftDepositStatements.insert.run({ owned_gift_id: ownedGiftId, tg_id: tgId, listing_id: listingId });
+}
+
 module.exports = {
     db,
     findOrCreateUser,
@@ -1204,6 +1301,8 @@ module.exports = {
     setBalance,
     adjustBalance,
     upsertCollection,
+    findCollectionByName,
+    findOrCreateCollectionByName,
     listCollections,
     upsertModel,
     upsertBackdrop,
@@ -1251,4 +1350,8 @@ module.exports = {
     acceptTrade,
     declineTrade,
     cancelTrade,
+    saveBusinessConnection,
+    getActiveBusinessConnection,
+    isGiftAlreadyDeposited,
+    recordGiftDeposit,
 };
