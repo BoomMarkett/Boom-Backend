@@ -104,19 +104,41 @@ if (!TON_WITHDRAW_MNEMONIC) {
     console.warn('⚠️  TON_WITHDRAW_MNEMONIC не задан — реальный вывод TON будет недоступен!');
 }
 
-// TON_WITHDRAW_WALLET_VERSION — версия контракта кошелька выплат: 'v3r2' |
-// 'v4' (по умолчанию) | 'v5r1'. Из ОДНОЙ И ТОЙ ЖЕ сид-фразы разные версии
-// кошелька дают РАЗНЫЕ адреса — если сервер вычисляет не тот адрес, что вы
-// видите у себя в кошельке (Tonkeeper и т.п.), значит версия указана неверно.
-// Смотрите лог "Горячий кошелёк для выводов" при старте — там же выводятся
-// адреса всех версий сразу, чтобы можно было найти совпадение с вашим
-// реальным кошельком и, если нужно, поправить эту переменную.
-const TON_WITHDRAW_WALLET_VERSION = (process.env.TON_WITHDRAW_WALLET_VERSION || 'v4').toLowerCase();
+// TON_WITHDRAW_WALLET_VERSION — необязательный РУЧНОЙ override версии
+// контракта кошелька выплат ('v3r2' | 'v4' | 'v5r1'), если понадобится
+// принудительно указать версию. Обычно не нужен — см. detectHotWalletVersion
+// ниже: сервер сам определяет версию, проверяя в блокчейне, какой из
+// адресов (посчитанных из той же мнемоники под разные версии) реально
+// задеплоен/имеет баланс, поскольку из ОДНОЙ сид-фразы разные версии
+// кошелька дают РАЗНЫЕ адреса.
+const TON_WITHDRAW_WALLET_VERSION = (process.env.TON_WITHDRAW_WALLET_VERSION || '').toLowerCase();
 
-function walletContractClassFor(version) {
-    if (version === 'v3r2') return WalletContractV3R2;
-    if (version === 'v5r1') return WalletContractV5R1;
-    return WalletContractV4;
+const WALLET_VERSION_CANDIDATES = [
+    ['v3r2', WalletContractV3R2],
+    ['v4', WalletContractV4],
+    ['v5r1', WalletContractV5R1],
+];
+
+// Проверяет в блокчейне для каждой версии кошелька: задеплоен ли адрес
+// (т.е. хоть раз отправлял транзакцию) и какой у него баланс. Так можно
+// понять, какой версией реально пользуется владелец сид-фразы, не спрашивая
+// его каждый раз вручную.
+async function detectHotWalletVersion(client, publicKey) {
+    const infos = [];
+    for (const [label, WalletClass] of WALLET_VERSION_CANDIDATES) {
+        let address = null;
+        let deployed = false;
+        let balanceNano = 0n;
+        try {
+            address = WalletClass.create({ workchain: 0, publicKey }).address;
+            try { deployed = await client.isContractDeployed(address); } catch (e) { /* сеть могла моргнуть — не критично */ }
+            try { balanceNano = await client.getBalance(address); } catch (e) { /* аналогично */ }
+        } catch (e) {
+            // Эта версия вообще не смогла вычислить адрес — пропускаем.
+        }
+        infos.push({ label, WalletClass, address, deployed, balanceNano });
+    }
+    return infos;
 }
 
 // Кошелёк поднимается лениво и один раз на весь процесс (создание TonClient +
@@ -131,39 +153,67 @@ function getHotWallet() {
                 apiKey: TONCENTER_API_KEY || undefined,
             });
 
-            // Диагностика: печатаем адрес для КАЖДОЙ поддерживаемой версии из этой
-            // же мнемоники — так сразу видно, какая версия совпадает с реальным
-            // кошельком, если используемая по умолчанию (или заданная в env) не та.
-            try {
-                const candidates = [
-                    ['v3r2', WalletContractV3R2],
-                    ['v4', WalletContractV4],
-                    ['v5r1', WalletContractV5R1],
-                ];
-                console.log('🔎 Адреса горячего кошелька по версиям контракта (для сверки с реальным кошельком):');
-                candidates.forEach(([label, WalletClass]) => {
-                    try {
-                        const addr = WalletClass.create({ workchain: 0, publicKey: keyPair.publicKey }).address.toString({ bounceable: false });
-                        const mark = label === TON_WITHDRAW_WALLET_VERSION ? '  ← сейчас используется' : '';
-                        console.log(`   ${label}: ${addr}${mark}`);
-                    } catch (e) {
-                        console.log(`   ${label}: не удалось вычислить (${e.message})`);
-                    }
-                });
-            } catch (e) {
-                // Диагностика не должна ронять инициализацию кошелька, даже если сама сломалась.
+            const infos = await detectHotWalletVersion(client, keyPair.publicKey);
+
+            console.log('🔎 Автоопределение версии горячего кошелька для выводов (по данным блокчейна):');
+            infos.forEach(info => {
+                const addrStr = info.address ? info.address.toString({ bounceable: false }) : '— не вычислен';
+                const balanceStr = info.address ? `${(Number(info.balanceNano) / 1e9).toFixed(4)} TON` : '';
+                const deployedStr = info.address ? (info.deployed ? 'задеплоен' : 'не задеплоен') : '';
+                console.log(`   ${info.label}: ${addrStr}  ${balanceStr}  ${deployedStr}`.trimEnd());
+            });
+
+            let chosen = null;
+
+            // 1) Ручной override, если явно задан — имеет приоритет над автоопределением.
+            if (TON_WITHDRAW_WALLET_VERSION) {
+                chosen = infos.find(i => i.label === TON_WITHDRAW_WALLET_VERSION && i.address);
+                if (chosen) console.log(`   → используется версия из TON_WITHDRAW_WALLET_VERSION: ${chosen.label}`);
             }
 
-            const WalletClass = walletContractClassFor(TON_WITHDRAW_WALLET_VERSION);
-            const wallet = WalletClass.create({ workchain: 0, publicKey: keyPair.publicKey });
+            // 2) Автовыбор: версия, чей адрес реально задеплоен в блокчейне —
+            // это и есть тот кошелёк, которым владелец фактически пользуется.
+            if (!chosen) {
+                const deployedOnes = infos.filter(i => i.deployed);
+                if (deployedOnes.length === 1) {
+                    chosen = deployedOnes[0];
+                    console.log(`   → автоматически выбрана версия: ${chosen.label} (единственная задеплоенная в сети)`);
+                } else if (deployedOnes.length > 1) {
+                    // Редкий случай — несколько версий когда-либо использовались.
+                    // Берём с наибольшим текущим балансом как наиболее вероятную "рабочую".
+                    chosen = deployedOnes.reduce((a, b) => (a.balanceNano > b.balanceNano ? a : b));
+                    console.log(`   ⚠️  Задеплоено сразу несколько версий — выбрана с наибольшим балансом: ${chosen.label}. Если это не та, задайте TON_WITHDRAW_WALLET_VERSION вручную.`);
+                }
+            }
+
+            // 3) Ни одна версия ещё не задеплоена (свежесозданный кошелёк), но на
+            // одной из них уже есть баланс — значит именно её вы и планируете
+            // использовать (просто ещё ни разу не отправляли с неё перевод).
+            if (!chosen) {
+                const funded = infos.filter(i => i.balanceNano > 0n);
+                if (funded.length === 1) {
+                    chosen = funded[0];
+                    console.log(`   → автоматически выбрана версия: ${chosen.label} (единственная с ненулевым балансом)`);
+                } else if (funded.length > 1) {
+                    chosen = funded.reduce((a, b) => (a.balanceNano > b.balanceNano ? a : b));
+                    console.log(`   ⚠️  Баланс есть сразу на нескольких версиях — выбрана с наибольшим: ${chosen.label}. Если это не та, задайте TON_WITHDRAW_WALLET_VERSION вручную.`);
+                }
+            }
+
+            // 4) Совсем ничего не удалось определить (кошелёк пуст и ни разу не
+            // использовался) — используем v4 по умолчанию и явно предупреждаем,
+            // чтобы не было тихой ошибки "перевёл, а деньги ушли не туда".
+            if (!chosen) {
+                chosen = infos.find(i => i.label === 'v4' && i.address) || infos.find(i => i.address);
+                console.log(`   ⚠️  Не удалось определить версию автоматически (кошелёк ещё пуст/не задеплоен) — используется версия по умолчанию: ${chosen ? chosen.label : '?'}. Пополните нужный адрес из списка выше и перезапустите сервер, либо задайте TON_WITHDRAW_WALLET_VERSION вручную.`);
+            }
+
+            const wallet = chosen.WalletClass.create({ workchain: 0, publicKey: keyPair.publicKey });
             const contract = client.open(wallet);
-            // Печатаем адрес горячего кошелька один раз при первом использовании —
-            // без этого невозможно проверить в эксплорере (tonviewer.com/tonscan.org),
+            // Печатаем итоговый выбор один раз при первом использовании — без
+            // этого невозможно проверить в эксплорере (tonviewer.com/tonscan.org),
             // есть ли на нём вообще TON для покрытия выводов и комиссии сети.
-            // Самая частая причина "Не удалось отправить перевод": на этом
-            // адресе просто не хватает TON (или используется не та версия кошелька,
-            // см. диагностику по версиям выше).
-            console.log(`💼 Горячий кошелёк для выводов (версия ${TON_WITHDRAW_WALLET_VERSION}): ${wallet.address.toString({ bounceable: false })}`);
+            console.log(`💼 Горячий кошелёк для выводов (версия ${chosen.label}): ${wallet.address.toString({ bounceable: false })}`);
             return { client, contract, keyPair, address: wallet.address };
         })().catch((e) => {
             // Если инициализация (разбор мнемоники и т.п.) провалилась — не
