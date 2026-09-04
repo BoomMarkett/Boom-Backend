@@ -1284,6 +1284,7 @@ const giftDepositStatements = {
         INSERT INTO gift_deposits (owned_gift_id, tg_id, listing_id) VALUES (@owned_gift_id, @tg_id, @listing_id)
     `),
     findByOwnedGiftId: db.prepare('SELECT * FROM gift_deposits WHERE owned_gift_id = ?'),
+    findByListingId: db.prepare('SELECT * FROM gift_deposits WHERE listing_id = ?'),
 };
 
 function isGiftAlreadyDeposited(ownedGiftId) {
@@ -1292,6 +1293,10 @@ function isGiftAlreadyDeposited(ownedGiftId) {
 
 function recordGiftDeposit(ownedGiftId, tgId, listingId) {
     giftDepositStatements.insert.run({ owned_gift_id: ownedGiftId, tg_id: tgId, listing_id: listingId });
+}
+
+function getGiftDepositByListingId(listingId) {
+    return giftDepositStatements.findByListingId.get(listingId);
 }
 
 module.exports = {
@@ -1354,4 +1359,5 @@ module.exports = {
     getActiveBusinessConnection,
     isGiftAlreadyDeposited,
     recordGiftDeposit,
+    getGiftDepositByListingId,
 };

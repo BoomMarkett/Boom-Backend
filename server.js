@@ -57,6 +57,8 @@ const {
     getActiveBusinessConnection,
     isGiftAlreadyDeposited,
     recordGiftDeposit,
+    getGiftDepositByListingId,
+    setListingStatus,
 } = require('./database');
 
 const app = express();
@@ -780,6 +782,132 @@ app.post('/api/inventory/add', requireAuth, (req, res) => {
     });
 
     res.json({ ok: true, listing });
+});
+
+// =====================================================================
+// ВЫВОД ПОДАРКА-NFT ОБРАТНО В TELEGRAM (Business API)
+//
+// Зеркально приёму: подарок физически "лежит" на business-аккаунте, пока
+// он у пользователя в Хранилище. При выводе просим Telegram передать
+// именно этот экземпляр (по owned_gift_id, сохранённому при депозите)
+// обратно на аккаунт владельца через transferGift.
+// =====================================================================
+
+/**
+ * Ищет конкретный подарок по owned_gift_id среди подарков business-аккаунта,
+ * постранично перебирая getBusinessAccountGifts — нужен главным образом
+ * ради поля transfer_star_count (сколько Stars спишется за перевод, если
+ * перевод платный; для большинства подарков это 0 — бесплатно).
+ * Ищет не более MAX_PAGES страниц, чтобы не уйти в бесконечный цикл, если
+ * подарок почему-то не найдётся (например, был выведен вручную из Telegram).
+ */
+async function findOwnedGiftById(businessConnectionId, ownedGiftId) {
+    const MAX_PAGES = 20;
+    let offset = '';
+
+    for (let page = 0; page < MAX_PAGES; page++) {
+        const res = await fetch(`${TELEGRAM_API_BASE}/getBusinessAccountGifts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                business_connection_id: businessConnectionId,
+                exclude_unique: false,
+                exclude_from_blockchain: false,
+                offset,
+                limit: 100,
+            }),
+        });
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.description || 'getBusinessAccountGifts failed');
+
+        const found = (data.result.gifts || []).find(g => g.owned_gift_id === ownedGiftId);
+        if (found) return found;
+
+        if (!data.result.next_offset) break;
+        offset = data.result.next_offset;
+    }
+
+    return null;
+}
+
+app.post('/api/inventory/:id/withdraw-gift', requireAuth, async (req, res) => {
+    const listing = getListingWithDetails(req.params.id);
+
+    if (!listing || listing.owner_tg_id !== req.tgId) {
+        return res.status(404).json({ ok: false, error: 'Подарок не найден' });
+    }
+    if (listing.status !== 'owned') {
+        return res.status(400).json({ ok: false, error: 'Подарок сейчас выставлен на продажу или уже недоступен' });
+    }
+
+    const deposit = getGiftDepositByListingId(listing.id);
+    if (!deposit) {
+        return res.status(400).json({
+            ok: false,
+            error: 'Этот подарок был добавлен не через депозит из Telegram — автоматический вывод для него недоступен',
+        });
+    }
+
+    const connection = getActiveBusinessConnection();
+    if (!connection) {
+        return res.status(503).json({ ok: false, error: 'Приём/вывод подарков сейчас не настроен, попробуйте позже' });
+    }
+
+    try {
+        // Узнаём точную стоимость перевода в Stars (обычно 0 — бесплатно).
+        const giftOnAccount = await findOwnedGiftById(connection.connection_id, deposit.owned_gift_id);
+        const starCount = giftOnAccount?.transfer_star_count || 0;
+
+        if (giftOnAccount && giftOnAccount.can_be_transferred === false) {
+            return res.status(400).json({ ok: false, error: 'Telegram временно запрещает передачу этого подарка, попробуйте позже' });
+        }
+
+        const transferRes = await fetch(`${TELEGRAM_API_BASE}/transferGift`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                business_connection_id: connection.connection_id,
+                owned_gift_id: deposit.owned_gift_id,
+                new_owner_chat_id: req.tgId,
+                star_count: starCount,
+            }),
+        });
+        const transferData = await transferRes.json();
+
+        if (!transferData.ok) {
+            console.error('⚠️  transferGift не удался:', transferData.description);
+            // Самая частая причина — получатель не был активен в Telegram
+            // последние 24 часа (требование самого Telegram).
+            return res.status(400).json({
+                ok: false,
+                error: transferData.description?.includes('CHAT_ADMIN_REQUIRED') || transferData.description?.includes('USER_')
+                    ? 'Не удалось передать подарок — откройте Telegram и повторите попытку через минуту'
+                    : (transferData.description || 'Не удалось передать подарок'),
+            });
+        }
+
+        setListingStatus(listing.id, 'withdrawn');
+        createTransaction({
+            tg_id: req.tgId,
+            type: 'withdraw_gift',
+            amount: 0,
+            listing_id: listing.id,
+            collection_name: listing.collection_name,
+            collection_image: listing.collection_image,
+            model_name: listing.model_name,
+            model_image: listing.model_image,
+            backdrop_name: listing.backdrop_name,
+            backdrop_color: listing.backdrop_color,
+            symbol_name: listing.symbol_name,
+            symbol_icon: listing.symbol_icon,
+            gift_number: listing.gift_number,
+        });
+
+        res.json({ ok: true });
+    } catch (e) {
+        console.error('⚠️  Ошибка вывода подарка:', e);
+        res.status(500).json({ ok: false, error: 'Техническая ошибка при выводе, попробуйте позже' });
+    }
 });
 
 // =====================================================================
