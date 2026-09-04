@@ -119,10 +119,16 @@ const WALLET_VERSION_CANDIDATES = [
     ['v5r1', WalletContractV5R1],
 ];
 
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // Проверяет в блокчейне для каждой версии кошелька: задеплоен ли адрес
 // (т.е. хоть раз отправлял транзакцию) и какой у него баланс. Так можно
 // понять, какой версией реально пользуется владелец сид-фразы, не спрашивая
-// его каждый раз вручную.
+// его каждый раз вручную. Небольшая пауза между запросами — иначе анонимный
+// (без TONCENTER_API_KEY) лимит TonCenter легко словить всего на 6 запросах
+// подряд (429 Too Many Requests).
 async function detectHotWalletVersion(client, publicKey) {
     const infos = [];
     for (const [label, WalletClass] of WALLET_VERSION_CANDIDATES) {
@@ -132,7 +138,9 @@ async function detectHotWalletVersion(client, publicKey) {
         try {
             address = WalletClass.create({ workchain: 0, publicKey }).address;
             try { deployed = await client.isContractDeployed(address); } catch (e) { /* сеть могла моргнуть — не критично */ }
+            await sleep(350);
             try { balanceNano = await client.getBalance(address); } catch (e) { /* аналогично */ }
+            await sleep(350);
         } catch (e) {
             // Эта версия вообще не смогла вычислить адрес — пропускаем.
         }
