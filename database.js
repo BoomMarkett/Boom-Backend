@@ -270,6 +270,21 @@ addColumnIfMissing('trades', 'fee_amount', "REAL NOT NULL DEFAULT 0");
 // именно так они себя и вели раньше (один ордер = один айтем).
 addColumnIfMissing('orders', 'quantity', 'INTEGER NOT NULL DEFAULT 1');
 addColumnIfMissing('orders', 'filled_count', 'INTEGER NOT NULL DEFAULT 0');
+// last_seen_at — обновляется на каждый авторизованный запрос (см. requireAuth
+// в server.js), используется только для админ-консоли ("активны сейчас").
+addColumnIfMissing('users', 'last_seen_at', 'TEXT');
+
+// bot_visits — лёгкий лог "человек открыл приложение" (одна запись на каждый
+// успешный /api/auth). Нужен только для счётчика "посещений за 24ч" в
+// админ-консоли — поэтому не храним ничего кроме tg_id и времени.
+db.exec(`
+    CREATE TABLE IF NOT EXISTS bot_visits (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tg_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_bot_visits_created_at ON bot_visits(created_at);
+`);
 
 // === Подготовленные запросы: пользователи ===
 const userStatements = {
@@ -323,6 +338,63 @@ function adjustBalance(tgId, delta) {
     if (newBalance < 0) throw new Error('Недостаточно средств');
 
     return setBalance(tgId, newBalance);
+}
+
+// === Активность пользователей (только для админ-консоли) ===
+const touchLastSeenStmt = db.prepare('UPDATE users SET last_seen_at = datetime(\'now\') WHERE tg_id = ?');
+function touchUserLastSeen(tgId) {
+    touchLastSeenStmt.run(tgId);
+}
+
+const recordBotVisitStmt = db.prepare('INSERT INTO bot_visits (tg_id) VALUES (?)');
+function recordBotVisit(tgId) {
+    recordBotVisitStmt.run(tgId);
+}
+
+// "Онлайн сейчас" — активность (любой авторизованный запрос) за последние
+// ONLINE_WINDOW_MINUTES минут. Не идеальная метрика реалтайма (нет
+// websocket/presence), но для админ-консоли достаточно и просто.
+const ONLINE_WINDOW_MINUTES = 5;
+
+function getAdminStats() {
+    const onlineNow = db.prepare(
+        `SELECT COUNT(*) AS c FROM users WHERE last_seen_at >= datetime('now', '-${ONLINE_WINDOW_MINUTES} minutes')`
+    ).get().c;
+
+    const visits24h = db.prepare(
+        `SELECT COUNT(*) AS c FROM bot_visits WHERE created_at >= datetime('now', '-24 hours')`
+    ).get().c;
+
+    // Депозиты — считаем только реально подтверждённые (status='confirmed'),
+    // по времени подтверждения (не создания заявки).
+    const deposits24h = db.prepare(
+        `SELECT COALESCE(SUM(amount), 0) AS s FROM deposits
+         WHERE status = 'confirmed' AND confirmed_at >= datetime('now', '-24 hours')`
+    ).get().s;
+
+    // Выводы — только реально завершённые (деньги ушли), по времени решения.
+    const withdrawals24h = db.prepare(
+        `SELECT COALESCE(SUM(amount), 0) AS s FROM withdrawals
+         WHERE status = 'completed' AND resolved_at >= datetime('now', '-24 hours')`
+    ).get().s;
+
+    const totalBalance = db.prepare(`SELECT COALESCE(SUM(balance), 0) AS s FROM users`).get().s;
+
+    // NFT "в штуках" — всё, что сейчас реально у кого-то на руках: на
+    // продаже (active) или в хранилище (owned). sold/cancelled — легаси
+    // статусы, новый код их не создаёт, в текущий подсчёт не годятся.
+    const totalNftCount = db.prepare(
+        `SELECT COUNT(*) AS c FROM listings WHERE status IN ('active', 'owned')`
+    ).get().c;
+
+    return {
+        onlineNow,
+        visits24h,
+        deposits24h,
+        withdrawals24h,
+        totalBalance,
+        totalNftCount,
+    };
 }
 
 // === Подготовленные запросы: коллекции и каталог трейтов (используется сид-скриптом) ===
@@ -1467,4 +1539,7 @@ module.exports = {
     isGiftAlreadyDeposited,
     recordGiftDeposit,
     getGiftDepositByListingId,
+    touchUserLastSeen,
+    recordBotVisit,
+    getAdminStats,
 };

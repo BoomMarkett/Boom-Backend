@@ -67,6 +67,9 @@ const {
     setListingStatus,
     tryLockListingForWithdrawal,
     unlockListingAfterFailedWithdrawal,
+    touchUserLastSeen,
+    recordBotVisit,
+    getAdminStats,
 } = require('./database');
 
 const app = express();
@@ -936,6 +939,9 @@ function requireAuth(req, res, next) {
     try {
         const payload = jwt.verify(token, JWT_SECRET);
         req.tgId = payload.tgId;
+        // Только для админ-консоли ("активны сейчас") — лёгкий апдейт одной
+        // колонки, никакого влияния на основную логику запроса.
+        touchUserLastSeen(req.tgId);
         next();
     } catch (e) {
         return res.status(401).json({ ok: false, error: 'Токен недействителен или истёк' });
@@ -961,6 +967,11 @@ app.post('/api/auth', authLimiter, (req, res) => {
 
     const token = jwt.sign({ tgId: user.tg_id }, JWT_SECRET, { expiresIn: TOKEN_LIFETIME });
 
+    // Только для админ-консоли ("посещений за 24ч") — каждый успешный вход
+    // в приложение считается одним "посещением".
+    recordBotVisit(user.tg_id);
+    touchUserLastSeen(user.tg_id);
+
     console.log('Успешный вход:', user.tg_id, user.username);
 
     res.json({
@@ -973,6 +984,7 @@ app.post('/api/auth', authLimiter, (req, res) => {
             username: user.username,
             photo_url: user.photo_url,
             balance: user.balance,
+            isAdmin: ADMIN_TG_IDS.includes(user.tg_id),
         },
     });
 });
@@ -986,6 +998,18 @@ app.get('/api/balance', requireAuth, (req, res) => {
     }
 
     res.json({ ok: true, balance: user.balance });
+});
+
+// === Админ-консоль — статистика площадки, доступна ТОЛЬКО из ADMIN_TG_IDS ===
+function requireAdmin(req, res, next) {
+    if (!ADMIN_TG_IDS.includes(req.tgId)) {
+        return res.status(403).json({ ok: false, error: 'Доступ только для администратора' });
+    }
+    next();
+}
+
+app.get('/api/admin/stats', requireAuth, requireAdmin, (req, res) => {
+    res.json({ ok: true, stats: getAdminStats() });
 });
 
 // === Пополнение баланса ===
