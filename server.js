@@ -18,6 +18,9 @@ const {
     getListingWithDetails,
     createListing,
     transferListingToBuyer,
+    tryTransferListingToBuyer,
+    tryTransferListingToBuyerFlexible,
+    restoreListingAfterFailedPurchase,
     returnListingToOwnerStorage,
     relistOwnedItem,
     listOwnedItemsForUser,
@@ -2353,12 +2356,25 @@ app.post('/api/listings/:id/buy', requireAuth, (req, res) => {
         return res.status(400).json({ ok: false, error: 'Нельзя купить собственный лот' });
     }
 
+    // "Столбим" лот ДО того, как трогать чей-либо баланс: атомарный UPDATE
+    // сработает только если статус всё ещё 'active' на момент выполнения.
+    // Если два покупателя одновременно жмут "Купить" на один и тот же лот —
+    // деньги спишутся только у того, кто реально победил гонку; второй
+    // получит честную ошибку, а не задвоенное списание/зачисление.
+    const { ok: reserved, listing: afterReserve } = tryTransferListingToBuyer(listing.id, req.tgId);
+    if (!reserved) {
+        return res.status(400).json({ ok: false, error: 'Этот лот уже продан или снят с продажи' });
+    }
+
     let buyer;
     try {
         // Списываем у покупателя полную цену — adjustBalance сама бросит ошибку,
         // если средств не хватает.
         buyer = adjustBalance(req.tgId, -listing.price);
     } catch (e) {
+        // Средств не хватило — откатываем "бронь" лота обратно продавцу
+        // (и статус, и владельца — tryTransferListingToBuyer уже сменил их).
+        restoreListingAfterFailedPurchase(listing.id, listing.owner_tg_id, 'active');
         return res.status(400).json({ ok: false, error: 'Недостаточно средств на балансе' });
     }
 
@@ -2366,11 +2382,9 @@ app.post('/api/listings/:id/buy', requireAuth, (req, res) => {
     const sellerPayout = listing.price * (1 - MARKETPLACE_FEE_PERCENT / 100);
     const sellerTgId = listing.owner_tg_id;
     adjustBalance(sellerTgId, sellerPayout);
-    // Товар переходит покупателю и оседает в его "Хранилище".
-    const updatedListing = transferListingToBuyer(listing.id, req.tgId);
 
     // Записываем обе стороны сделки в историю — снимок данных подарка берём
-    // из listing (не из updatedListing, там только сырые поля без JOIN).
+    // из listing (не из afterReserve, там только сырые поля без JOIN).
     const giftSnapshot = {
         listing_id: listing.id,
         collection_name: listing.collection_name,
@@ -2392,7 +2406,7 @@ app.post('/api/listings/:id/buy', requireAuth, (req, res) => {
         listing.model_image || listing.collection_image
     );
 
-    res.json({ ok: true, balance: buyer.balance, listing: updatedListing });
+    res.json({ ok: true, balance: buyer.balance, listing: afterReserve });
 });
 
 // === История операций пользователя (пополнения, выводы, покупки, продажи) ===
@@ -2536,6 +2550,27 @@ app.post('/api/listings/:id/accept-offer', requireAuth, (req, res) => {
         return res.status(400).json({ ok: false, error: 'Предложение не подходит под этот лот' });
     }
 
+    // "Столбим" и лот, и ордер ДО начисления денег продавцу — оба через
+    // атомарный CAS-запрос в БД. Если кто-то другой успел продать этот же
+    // лот (или тот же ордер уже исполнен другим продавцом) буквально на
+    // долю секунды раньше — здесь это будет честно отклонено, а не
+    // задвоено. originalStatus запоминаем ДО захвата, чтобы было куда
+    // откатывать, если вторая из двух блокировок не возьмётся.
+    const originalStatus = listing.status;
+
+    const { ok: listingLocked } = tryTransferListingToBuyerFlexible(listing.id, order.buyer_tg_id);
+    if (!listingLocked) {
+        return res.status(400).json({ ok: false, error: 'Товар уже продан или недоступен' });
+    }
+
+    const { ok: orderFilled } = fillOrderOnce(order.id, listing.id);
+    if (!orderFilled) {
+        // Это предложение увели из-под носа (исполнено параллельно другим
+        // продавцом) — откатываем захват лота, деньги ещё никого не тронули.
+        restoreListingAfterFailedPurchase(listing.id, req.tgId, originalStatus);
+        return res.status(400).json({ ok: false, error: 'Это предложение больше недоступно' });
+    }
+
     // Деньги покупателя уже зарезервированы на его балансе при создании ордера —
     // сделка проходит ровно по цене предложения (order.max_price), продавец
     // получает её за вычетом комиссии.
@@ -2543,9 +2578,7 @@ app.post('/api/listings/:id/accept-offer', requireAuth, (req, res) => {
     const seller = adjustBalance(req.tgId, sellerPayout);
 
     const details = getListingWithDetails(listing.id);
-    // Товар переходит покупателю (автору оффера) и оседает в его "Хранилище".
-    const soldListing = transferListingToBuyer(listing.id, order.buyer_tg_id);
-    fillOrderOnce(order.id, listing.id);
+    const soldListing = details;
     const giftSnapshot = {
         listing_id: listing.id,
         collection_name: details.collection_name,

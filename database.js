@@ -593,6 +593,28 @@ const listingStatements = {
     // оседает в его личном "Хранилище" (status = 'owned'), откуда его можно
     // либо просто держать, либо выставить обратно на продажу через relist.
     transferToBuyer: db.prepare(`UPDATE listings SET owner_tg_id = ?, status = 'owned', sold_at = datetime('now') WHERE id = ?`),
+    // CAS-варианты того же перехода — срабатывают, только если статус на
+    // момент выполнения ещё ровно тот, что ожидался. Так при двух
+    // одновременных попытках купить/принять оффер по одному и тому же лоту
+    // сработает ровно один запрос (result.changes > 0), а не оба — деньги
+    // спишутся только у того, кто реально победил гонку. Используются в
+    // /api/listings/:id/buy (только 'active') и .../accept-offer (ещё и
+    // 'owned' — кнопка "Быстрая продажа" продаёт товар прямо из хранилища).
+    transferToBuyerIfActive: db.prepare(
+        `UPDATE listings SET owner_tg_id = ?, status = 'owned', sold_at = datetime('now') WHERE id = ? AND status = 'active'`
+    ),
+    transferToBuyerIfActiveOrOwned: db.prepare(
+        `UPDATE listings SET owner_tg_id = ?, status = 'owned', sold_at = datetime('now') WHERE id = ? AND status IN ('active', 'owned')`
+    ),
+    // Откат "брони" покупки, если после резервирования лота выяснилось, что
+    // сделка не может завершиться (например, не хватило денег на балансе
+    // покупателя, или парный ордер увели из-под носа) — возвращаем лот
+    // исходному владельцу и исходному статусу ('active' или 'owned', смотря
+    // откуда его "бронировали"), sold_at сбрасываем в NULL — по-настоящему
+    // продан он не был.
+    restoreAfterFailedPurchase: db.prepare(
+        `UPDATE listings SET owner_tg_id = ?, status = ?, sold_at = NULL WHERE id = ?`
+    ),
     // Возврат владельцу в хранилище — используется при снятии лота с продажи
     // (раньше товар после отмены просто "исчезал" в статусе cancelled).
     returnToOwner: db.prepare(`UPDATE listings SET status = 'owned' WHERE id = ?`),
@@ -615,6 +637,31 @@ function getListingById(id) {
 
 function transferListingToBuyer(id, buyerTgId) {
     listingStatements.transferToBuyer.run(buyerTgId, id);
+    return getListingById(id);
+}
+
+/** CAS-версия: переводит листинг покупателю, только если он ещё 'active'.
+ * Возвращает { ok, listing } — ok: false значит, что кто-то другой купил
+ * этот же лот первым (гонка), listing в этом случае — актуальное состояние
+ * ПОСЛЕ проигранной гонки, чтобы вызывающий код мог показать точную причину. */
+function tryTransferListingToBuyer(id, buyerTgId) {
+    const result = listingStatements.transferToBuyerIfActive.run(buyerTgId, id);
+    return { ok: result.changes > 0, listing: getListingById(id) };
+}
+
+/** То же самое, но для принятия оффера — статус на старте может быть
+ * 'active' (обычный лот) ИЛИ 'owned' (товар из "Хранилища", кнопка
+ * "Быстрая продажа"). */
+function tryTransferListingToBuyerFlexible(id, buyerTgId) {
+    const result = listingStatements.transferToBuyerIfActiveOrOwned.run(buyerTgId, id);
+    return { ok: result.changes > 0, listing: getListingById(id) };
+}
+
+/** Откатывает "бронь" лота обратно исходному владельцу и исходному статусу
+ * ('active' или 'owned') — используется, если после успешного
+ * tryTransferListingToBuyer(Flexible) сделка всё же не может завершиться. */
+function restoreListingAfterFailedPurchase(id, originalOwnerTgId, originalStatus) {
+    listingStatements.restoreAfterFailedPurchase.run(originalOwnerTgId, originalStatus, id);
     return getListingById(id);
 }
 
@@ -932,7 +979,7 @@ const orderStatements = {
             matched_listing_id = ?,
             status = CASE WHEN filled_count + 1 >= quantity THEN 'filled' ELSE status END,
             closed_at = CASE WHEN filled_count + 1 >= quantity THEN datetime('now') ELSE closed_at END
-        WHERE id = ?
+        WHERE id = ? AND status = 'active' AND filled_count < quantity
     `),
 };
 
@@ -987,8 +1034,8 @@ function setOrderStatus(id, status, matchedListingId = null) {
 // используется и при мгновенном авто-матче на создание лота, и при принятии
 // предложения продавцом; ордер закрывается сам, когда выкуплено всё quantity.
 function fillOrderOnce(id, listingId) {
-    orderStatements.fillOnce.run(listingId, id);
-    return getOrderById(id);
+    const result = orderStatements.fillOnce.run(listingId, id);
+    return { ok: result.changes > 0, order: getOrderById(id) };
 }
 
 // Общий SELECT: критерии ордера (коллекция/модель/фон/символ, через JOIN на
@@ -1536,6 +1583,9 @@ module.exports = {
     unlockListingAfterFailedWithdrawal,
     findListings,
     transferListingToBuyer,
+    tryTransferListingToBuyer,
+    tryTransferListingToBuyerFlexible,
+    restoreListingAfterFailedPurchase,
     returnListingToOwnerStorage,
     relistOwnedItem,
     listOwnedItemsForUser,
