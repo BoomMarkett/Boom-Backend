@@ -1452,11 +1452,24 @@ app.post('/api/inventory/:id/withdraw-gift', requireAuth, async (req, res) => {
 // (слоты, рулетка, бомбер, башня, кости, плинко). Считается от суммы
 // выигрыша (не от ставки и не при проигрыше), округляется до копеек так же,
 // как и сам выигрыш.
-const GAME_WIN_FEE_PERCENT = 0.01;
+const GAME_WIN_FEE_PERCENT = 1;
 
 function applyGameWinFee(rawWinAmount) {
     if (!rawWinAmount) return rawWinAmount;
     return Math.round(rawWinAmount * (1 - GAME_WIN_FEE_PERCENT / 100) * 100) / 100;
+}
+
+// Проверяет, что на балансе хватает именно на ставку — ДО розыгрыша.
+// Важно делать эту проверку отдельно, а не полагаться на итоговую проверку
+// внутри adjustBalance(tgId, winAmount - bet): при выигрыше netDelta часто
+// положительный (выигрыш больше ставки), и adjustBalance пропустит игрока,
+// даже если у него изначально не хватало денег на саму ставку — из-за этого
+// можно было играть с недостаточным балансом и получать выигрыш.
+function requireSufficientBalance(tgId, bet) {
+    const user = getUserByTgId(tgId);
+    if (!user || user.balance < bet) {
+        throw new Error('Недостаточно средств на балансе');
+    }
 }
 
 // Символы барабана и их "вес" — насколько часто они выпадают на одном
@@ -1492,6 +1505,11 @@ app.post('/api/games/slots/spin', requireAuth, gamesLimiter, (req, res) => {
             ok: false,
             error: `Ставка должна быть от ${SLOTS_MIN_BET} до ${SLOTS_MAX_BET} TON, максимум с одним знаком после запятой`,
         });
+    }
+    try {
+        requireSufficientBalance(req.tgId, bet);
+    } catch (e) {
+        return res.status(400).json({ ok: false, error: e.message });
     }
 
     const reels = [spinReel(), spinReel(), spinReel()];
@@ -1565,6 +1583,11 @@ app.post('/api/games/roulette/spin', requireAuth, gamesLimiter, (req, res) => {
             ok: false,
             error: `Ставка должна быть от ${ROULETTE_MIN_BET} до ${ROULETTE_MAX_BET} TON, максимум с одним знаком после запятой`,
         });
+    }
+    try {
+        requireSufficientBalance(req.tgId, bet);
+    } catch (e) {
+        return res.status(400).json({ ok: false, error: e.message });
     }
 
     const segment = spinRoulette();
@@ -2012,6 +2035,11 @@ app.post('/api/games/dice/roll', requireAuth, gamesLimiter, (req, res) => {
     if (!Number.isInteger(number) || number < 1 || number > 6) {
         return res.status(400).json({ ok: false, error: 'Число должно быть от 1 до 6' });
     }
+    try {
+        requireSufficientBalance(req.tgId, bet);
+    } catch (e) {
+        return res.status(400).json({ ok: false, error: e.message });
+    }
 
     // Бросок — случайное число от 1 до 6.
     const roll = 1 + Math.floor(Math.random() * 6);
@@ -2106,6 +2134,11 @@ app.post('/api/games/plinko/drop', requireAuth, gamesLimiter, (req, res) => {
             ok: false,
             error: `Ставка должна быть от ${PLINKO_MIN_BET} до ${PLINKO_MAX_BET} TON, максимум с одним знаком после запятой`,
         });
+    }
+    try {
+        requireSufficientBalance(req.tgId, bet);
+    } catch (e) {
+        return res.status(400).json({ ok: false, error: e.message });
     }
 
     const slotIndex = plinkoPickBinIndex();
