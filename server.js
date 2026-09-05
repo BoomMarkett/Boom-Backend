@@ -30,7 +30,10 @@ const {
     confirmDeposit,
     expireDeposit,
     createWithdrawalRecord,
+    getWithdrawalById,
     resolveWithdrawal,
+    markWithdrawalAwaitingApproval,
+    claimWithdrawalForProcessing,
     createOrder,
     getOrderById,
     getOrderWithDetails,
@@ -67,7 +70,33 @@ const {
 } = require('./database');
 
 const app = express();
-app.use(cors());
+
+// =====================================================================
+// CORS
+// По умолчанию cors() без настроек разрешает запросы с ЛЮБОГО сайта — то
+// есть чужая страница в браузере пользователя технически могла бы дёргать
+// наш API так, будто запрос идёт из самого BoomMarket. Само по себе это не
+// сливает деньги (у чужой страницы всё равно нет JWT-токена пользователя),
+// но это лишняя открытая дверь на случай, если токен утечёт откуда-то ещё
+// (лог, расширение браузера и т.п.) — тогда его можно было бы использовать
+// с любого сайта. Сужаем до конкретных доменов приложения.
+//
+// ALLOWED_ORIGINS — через запятую, если доменов несколько (например, свой
+// домен + github.io на время переезда). Без Origin (curl, серверные вызовы,
+// вебхук Telegram) пропускаем — это не браузерные запросы, CORS их не касается.
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://holdenholden72-dotcom.github.io')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+app.use(cors({
+    origin(origin, callback) {
+        if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+            return callback(null, true);
+        }
+        callback(new Error('Заблокировано CORS-политикой'));
+    },
+}));
 app.use(express.json());
 
 // =====================================================================
@@ -203,6 +232,19 @@ const TONCENTER_ENDPOINT = 'https://toncenter.com/api/v2/jsonRPC';
 
 if (!TON_WITHDRAW_MNEMONIC) {
     console.warn('⚠️  TON_WITHDRAW_MNEMONIC не задан — реальный вывод TON будет недоступен!');
+}
+
+// ADMIN_TG_ID — Telegram-id администратора площадки (узнать свой можно у
+// @userinfobot). Крупные выводы (см. WITHDRAW_MANUAL_APPROVAL_THRESHOLD
+// ниже) не отправляются автоматически — админу приходит сообщение с
+// кнопками "Одобрить"/"Отклонить" (см. handleAdminCallback), и только его
+// нажатие реально запускает перевод. Без ADMIN_TG_ID такие выводы вообще
+// не могут быть одобрены — см. обработку ниже.
+const ADMIN_TG_ID = process.env.ADMIN_TG_ID ? parseInt(process.env.ADMIN_TG_ID, 10) : null;
+const WITHDRAW_MANUAL_APPROVAL_THRESHOLD = 500; // TON — от этой суммы включительно нужно ручное подтверждение
+
+if (!ADMIN_TG_ID) {
+    console.warn(`⚠️  ADMIN_TG_ID не задан — выводы от ${WITHDRAW_MANUAL_APPROVAL_THRESHOLD} TON не смогут получить подтверждение и будут отклоняться.`);
 }
 
 // TON_WITHDRAW_WALLET_VERSION — необязательный РУЧНОЙ override версии
@@ -477,6 +519,162 @@ async function notifyTelegram(tgId, text, photoUrl) {
     }
 }
 
+/**
+ * Уведомляет администратора о выводе, требующем ручного подтверждения —
+ * с кнопками "Одобрить"/"Отклонить" (callback_data содержит id заявки,
+ * обрабатывается в handleAdminCallback ниже).
+ */
+async function notifyAdminAboutWithdrawal(withdrawal, tgId, address) {
+    if (!ADMIN_TG_ID || !BOT_TOKEN) return;
+
+    const buyer = getUserByTgId(tgId);
+    const who = buyer?.username ? `@${buyer.username}` : `id ${tgId}`;
+    const text =
+        `⚠️ <b>Крупный вывод ждёт подтверждения</b>\n\n` +
+        `Пользователь: ${who}\n` +
+        `Сумма: <b>${withdrawal.amount} TON</b>\n` +
+        `Адрес: <code>${address}</code>\n` +
+        `Заявка: #${withdrawal.id}`;
+
+    const replyMarkup = {
+        inline_keyboard: [[
+            { text: '✅ Одобрить', callback_data: `wd_approve:${withdrawal.id}` },
+            { text: '❌ Отклонить', callback_data: `wd_reject:${withdrawal.id}` },
+        ]],
+    };
+
+    try {
+        const res = await fetch(`${TELEGRAM_API_BASE}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: ADMIN_TG_ID, text, parse_mode: 'HTML', reply_markup: replyMarkup }),
+        });
+        if (!res.ok) {
+            console.error('⚠️  Не удалось уведомить администратора о выводе:', await res.text());
+        }
+    } catch (e) {
+        console.error('⚠️  Ошибка уведомления администратора о выводе:', e.message);
+    }
+}
+
+async function answerCallbackQuery(callbackQueryId, text) {
+    if (!BOT_TOKEN) return;
+    try {
+        await fetch(`${TELEGRAM_API_BASE}/answerCallbackQuery`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                callback_query_id: callbackQueryId,
+                text,
+                show_alert: !!text && text.length > 40,
+            }),
+        });
+    } catch (e) {
+        console.error('⚠️  answerCallbackQuery ошибка:', e.message);
+    }
+}
+
+async function editAdminMessage(chatId, messageId, text) {
+    if (!BOT_TOKEN || !chatId || !messageId) return;
+    try {
+        await fetch(`${TELEGRAM_API_BASE}/editMessageText`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, message_id: messageId, text, parse_mode: 'HTML' }),
+        });
+    } catch (e) {
+        console.error('⚠️  editMessageText ошибка:', e.message);
+    }
+}
+
+/**
+ * Обрабатывает нажатие "Одобрить"/"Отклонить" под сообщением о крупном
+ * выводе. Доступно ТОЛЬКО администратору (ADMIN_TG_ID) — любой другой
+ * тап молча отклоняется с "Недостаточно прав". claimWithdrawalForProcessing
+ * — атомарный CAS (status: awaiting_approval -> processing): если админ
+ * умудрится тапнуть дважды (двойной тап, лаги Telegram), обработает
+ * только первый вызов, второй увидит changes=0 и остановится сам.
+ */
+async function handleAdminCallback(cbq) {
+    const fromId = cbq.from && cbq.from.id;
+    const data = cbq.data || '';
+
+    if (!ADMIN_TG_ID || fromId !== ADMIN_TG_ID) {
+        await answerCallbackQuery(cbq.id, 'Недостаточно прав');
+        return;
+    }
+
+    const [action, idStr] = data.split(':');
+    const withdrawalId = parseInt(idStr, 10);
+    if (!withdrawalId || (action !== 'wd_approve' && action !== 'wd_reject')) {
+        await answerCallbackQuery(cbq.id, 'Некорректный запрос');
+        return;
+    }
+
+    const withdrawal = getWithdrawalById(withdrawalId);
+    if (!withdrawal) {
+        await answerCallbackQuery(cbq.id, 'Заявка не найдена');
+        return;
+    }
+    if (withdrawal.status !== 'awaiting_approval') {
+        await answerCallbackQuery(cbq.id, `Уже обработано (${withdrawal.status})`);
+        return;
+    }
+
+    if (!claimWithdrawalForProcessing(withdrawalId)) {
+        await answerCallbackQuery(cbq.id, 'Уже обрабатывается');
+        return;
+    }
+
+    const chatId = cbq.message?.chat?.id;
+    const messageId = cbq.message?.message_id;
+
+    if (action === 'wd_reject') {
+        const restored = adjustBalance(withdrawal.tg_id, withdrawal.amount);
+        resolveWithdrawal(withdrawal.id, 'failed', 'Отклонено администратором');
+        await answerCallbackQuery(cbq.id, 'Отклонено, средства возвращены');
+        await editAdminMessage(chatId, messageId, `❌ Вывод #${withdrawal.id} (${withdrawal.amount} TON) отклонён — средства возвращены пользователю.`);
+        await notifyTelegram(withdrawal.tg_id, `❌ Ваш вывод <b>${withdrawal.amount} TON</b> отклонён администратором. Средства возвращены на баланс.`);
+        return;
+    }
+
+    // action === 'wd_approve'
+    await answerCallbackQuery(cbq.id, 'Отправляю перевод...');
+
+    try {
+        const toAddress = Address.parse(withdrawal.address);
+
+        // runSerializedWithdrawal — та же очередь, что и у обычных выводов:
+        // с горячего кошелька в любой момент времени уходит только ОДИН
+        // перевод, иначе конкурентные sendTransfer с одинаковым seqno
+        // могли бы столкнуться.
+        await runSerializedWithdrawal(() => sendTonWithdrawal(toAddress, withdrawal.amount, 'BoomMarket withdraw'));
+        createTransaction({ tg_id: withdrawal.tg_id, type: 'withdraw', amount: -withdrawal.amount });
+        resolveWithdrawal(withdrawal.id, 'completed');
+
+        await editAdminMessage(chatId, messageId, `✅ Вывод #${withdrawal.id} (${withdrawal.amount} TON) одобрен и отправлен.`);
+        await notifyTelegram(withdrawal.tg_id, `✅ Ваш вывод <b>${withdrawal.amount} TON</b> подтверждён и отправлен на кошелёк.`);
+    } catch (e) {
+        console.error(`⚠️  Ошибка одобренного вывода #${withdrawal.id}:`, e.message);
+
+        if (e instanceof WithdrawalConfirmationTimeout) {
+            // Как и в обычном флоу — перевод мог реально уйти в сеть, баланс
+            // не трогаем, только помечаем на ручную проверку блокчейна.
+            resolveWithdrawal(withdrawal.id, 'needs_review', e.message);
+            await editAdminMessage(
+                chatId, messageId,
+                `⚠️ Вывод #${withdrawal.id}: транзакция отправлена, подтверждение задерживается. Баланс НЕ возвращён — проверьте блокчейн вручную.`
+            );
+            return;
+        }
+
+        const restored = adjustBalance(withdrawal.tg_id, withdrawal.amount);
+        resolveWithdrawal(withdrawal.id, 'failed', e.message);
+        await editAdminMessage(chatId, messageId, `❌ Вывод #${withdrawal.id}: ошибка отправки (${e.message}). Средства возвращены пользователю.`);
+        await notifyTelegram(withdrawal.tg_id, `❌ Не удалось отправить ваш вывод ${withdrawal.amount} TON. Средства возвращены на баланс.`);
+    }
+}
+
 // =====================================================================
 // ПРИЁМ ПОДАРКОВ-NFT ИЗ TELEGRAM (Business API)
 //
@@ -528,6 +726,12 @@ app.post('/api/telegram/webhook', async (req, res) => {
 
 async function handleTelegramUpdate(update) {
     if (!update) return;
+
+    // Нажатие "Одобрить"/"Отклонить" под сообщением о крупном выводе.
+    if (update.callback_query) {
+        await handleAdminCallback(update.callback_query);
+        return;
+    }
 
     // Бот подключили/отключили/переподключили к Business-аккаунту —
     // запоминаем connection_id (пригодится позже для вывода подарков обратно
@@ -907,8 +1111,8 @@ app.post('/api/withdraw', requireAuth, withdrawLimiter, async (req, res) => {
     const amount = parseFloat(req.body.amount);
     const addressRaw = String(req.body.address || '').trim();
 
-    if (!isValidAmount(amount, 0.5, 100000)) {
-        return res.status(400).json({ ok: false, error: 'Сумма должна быть от 0.5 до 100000, максимум с одним знаком после запятой' });
+    if (!isValidAmount(amount, 0.5, 1000)) {
+        return res.status(400).json({ ok: false, error: 'Сумма должна быть от 0.5 до 1000, максимум с одним знаком после запятой' });
     }
     if (!addressRaw) {
         return res.status(400).json({ ok: false, error: 'Подключите кошелёк для вывода' });
@@ -937,6 +1141,34 @@ app.post('/api/withdraw', requireAuth, withdrawLimiter, async (req, res) => {
     }
 
     const withdrawalRecord = createWithdrawalRecord(req.tgId, amount, addressRaw);
+
+    // Крупная сумма — не отправляем автоматически, ждём ручного решения
+    // администратора (кнопки "Одобрить"/"Отклонить" в Telegram). Баланс уже
+    // списан выше — это НЕ ошибка, а обычная схема эскроу: деньги временно
+    // заморожены до решения, а не потрачены и не доступны пользователю.
+    if (amount >= WITHDRAW_MANUAL_APPROVAL_THRESHOLD) {
+        if (!ADMIN_TG_ID) {
+            // Некому одобрить — не держим деньги пользователя в подвешенном
+            // состоянии бесконечно, сразу возвращаем и просим написать в поддержку.
+            const restored = adjustBalance(req.tgId, amount);
+            resolveWithdrawal(withdrawalRecord.id, 'failed', 'ADMIN_TG_ID не настроен — некому подтвердить крупный вывод');
+            return res.status(503).json({
+                ok: false,
+                error: 'Вывод такой суммы временно недоступен, обратитесь в поддержку',
+                balance: restored.balance,
+            });
+        }
+
+        markWithdrawalAwaitingApproval(withdrawalRecord.id);
+        await notifyAdminAboutWithdrawal(withdrawalRecord, req.tgId, addressRaw);
+
+        return res.json({
+            ok: true,
+            pending: true,
+            balance: user.balance,
+            message: `Вывод от ${WITHDRAW_MANUAL_APPROVAL_THRESHOLD} TON требует ручного подтверждения — обычно занимает до нескольких часов. Баланс уже списан, TON придёт после одобрения.`,
+        });
+    }
 
     try {
         // Строго по одному с горячего кошелька — см. комментарий у
@@ -2414,6 +2646,18 @@ app.delete('/api/trades/:id', requireAuth, (req, res) => {
 
 app.get('/', (req, res) => {
     res.send('BoomMarket Backend работает v2');
+});
+
+// Общий обработчик ошибок — важен именно из-за CORS-проверки выше: если
+// origin не в списке разрешённых, express-cors передаёт сюда Error, и без
+// этого обработчика Express ответил бы 500 с текстом ошибки/стеком по
+// умолчанию. Так — аккуратный 403 без утечки деталей.
+app.use((err, req, res, next) => {
+    if (err && err.message === 'Заблокировано CORS-политикой') {
+        return res.status(403).json({ ok: false, error: 'Запрос заблокирован' });
+    }
+    console.error('Необработанная ошибка:', err);
+    res.status(500).json({ ok: false, error: 'Внутренняя ошибка сервера' });
 });
 
 const PORT = process.env.PORT || 3000;

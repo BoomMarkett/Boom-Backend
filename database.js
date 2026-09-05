@@ -203,12 +203,18 @@ db.exec(`
     -- случае НЕ возвращается автоматически (иначе при последующем реальном
     -- подтверждении на блокчейне получился бы задвоенный вывод) — запись
     -- просто ждёт ручной проверки администратором по адресу/сумме/времени.
+    -- 'awaiting_approval' — сумма выше порога ручного подтверждения
+    -- (WITHDRAW_MANUAL_APPROVAL_THRESHOLD), деньги на кошелёк ещё НЕ
+    -- отправлены, ждём решения администратора (см. handleAdminCallback).
+    -- 'processing' — админ уже нажал "Одобрить", перевод в процессе
+    -- отправки (короткое промежуточное состояние, защищает от повторного
+    -- нажатия той же кнопки).
     CREATE TABLE IF NOT EXISTS withdrawals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         tg_id INTEGER NOT NULL REFERENCES users(tg_id),
         amount REAL NOT NULL,
         address TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending', -- pending | completed | failed | needs_review
+        status TEXT NOT NULL DEFAULT 'pending', -- pending | completed | failed | needs_review | awaiting_approval | processing
         note TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         resolved_at TEXT
@@ -753,6 +759,16 @@ const withdrawalStatements = {
     resolve: db.prepare(`
         UPDATE withdrawals SET status = ?, note = ?, resolved_at = datetime('now') WHERE id = ?
     `),
+    // Переводит заявку в 'awaiting_approval' (сумма выше порога ручного
+    // подтверждения) — resolved_at не трогаем, заявка ещё не закрыта.
+    markAwaitingApproval: db.prepare(`UPDATE withdrawals SET status = 'awaiting_approval' WHERE id = ?`),
+    // Атомарный "захват" заявки в обработку — CAS-проверка "и статус ещё
+    // awaiting_approval". Если админ нажмёт кнопку дважды (или два тапа
+    // почти одновременно из-за лагов Telegram), обработает только один
+    // вызов: остальные получат changes=0 и не должны продолжать.
+    claimForProcessing: db.prepare(`
+        UPDATE withdrawals SET status = 'processing' WHERE id = ? AND status = 'awaiting_approval'
+    `),
 };
 
 function createWithdrawalRecord(tgId, amount, address) {
@@ -760,9 +776,23 @@ function createWithdrawalRecord(tgId, amount, address) {
     return withdrawalStatements.findById.get(info.lastInsertRowid);
 }
 
+function getWithdrawalById(id) {
+    return withdrawalStatements.findById.get(id);
+}
+
 function resolveWithdrawal(id, status, note = null) {
     withdrawalStatements.resolve.run(status, note, id);
     return withdrawalStatements.findById.get(id);
+}
+
+function markWithdrawalAwaitingApproval(id) {
+    withdrawalStatements.markAwaitingApproval.run(id);
+    return getWithdrawalById(id);
+}
+
+function claimWithdrawalForProcessing(id) {
+    const result = withdrawalStatements.claimForProcessing.run(id);
+    return result.changes > 0;
 }
 
 // === Подготовленные запросы: ордера на покупку ===
@@ -1404,7 +1434,10 @@ module.exports = {
     confirmDeposit,
     expireDeposit,
     createWithdrawalRecord,
+    getWithdrawalById,
     resolveWithdrawal,
+    markWithdrawalAwaitingApproval,
+    claimWithdrawalForProcessing,
     createOrder,
     hasOwnMatchingListing,
     getOrderById,
