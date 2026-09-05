@@ -87,7 +87,7 @@ const app = express();
 // ALLOWED_ORIGINS — через запятую, если доменов несколько (например, свой
 // домен + github.io на время переезда). Без Origin (curl, серверные вызовы,
 // вебхук Telegram) пропускаем — это не браузерные запросы, CORS их не касается.
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://holdenholden72-dotcom.github.io')
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://boommarkett.github.io')
     .split(',')
     .map(s => s.trim())
     .filter(Boolean);
@@ -499,7 +499,7 @@ app.get('/api/deposit-nft-info', (req, res) => {
     res.json({ ok: true, username: BUSINESS_ACCOUNT_USERNAME });
 });
 // URL мини-приложения — тот же, что в tonconnect-manifest.json.
-const MINI_APP_URL = process.env.MINI_APP_URL || 'https://holdenholden72-dotcom.github.io/BoomMarket/';
+const MINI_APP_URL = process.env.MINI_APP_URL || 'https://boommarkett.github.io/BoomMarket/';
 
 /**
  * Отправляет пользователю уведомление в бота: с картинкой подарка (если
