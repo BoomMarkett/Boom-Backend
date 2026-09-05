@@ -1,6 +1,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const cors = require('cors');
+const helmet = require('helmet');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const { TonClient, WalletContractV3R2, WalletContractV4, WalletContractV5R1, internal } = require('@ton/ton');
@@ -79,6 +80,20 @@ const {
 } = require('./database');
 
 const app = express();
+
+// Railway (как и любой другой PaaS) отдаёт трафик через свой прокси — без
+// этой настройки Express видит IP самого прокси, а не реального клиента.
+// Это ломает rate-limit по IP (см. authLimiter/generalApiLimiter ниже): либо
+// все пользователи схлопываются в один "IP" и лимитируются как один
+// человек, либо express-rate-limit сам начинает отказывать из-за
+// несостыковки с заголовком X-Forwarded-For. "1" — доверяем ровно одному
+// хопу прокси (стандартная схема для Railway/Render/большинства PaaS).
+app.set('trust proxy', 1);
+
+// Базовые защитные HTTP-заголовки (X-Content-Type-Options, отключение
+// заголовка X-Powered-By и т.п.). Отдача тут только JSON, а не HTML, так
+// что риск невелик — но лишним не будет и ничего не стоит.
+app.use(helmet());
 
 // =====================================================================
 // CORS
@@ -943,7 +958,12 @@ function requireAuth(req, res, next) {
     }
 
     try {
-        const payload = jwt.verify(token, JWT_SECRET);
+        // algorithms: явно фиксируем HS256 — тот же алгоритм, что и в jwt.sign
+        // ниже. Сейчас в проекте нигде нет асимметричных ключей, так что
+        // конкретной дыры без этого нет, но явное ограничение — простая
+        // страховка на случай, если библиотека когда-то изменит поведение
+        // по умолчанию или в проект добавят другой способ подписи токенов.
+        const payload = jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] });
         req.tgId = payload.tgId;
         // Только для админ-консоли ("активны сейчас") — лёгкий апдейт одной
         // колонки, никакого влияния на основную логику запроса.
@@ -971,7 +991,7 @@ app.post('/api/auth', authLimiter, (req, res) => {
 
     const user = findOrCreateUser(tgUser);
 
-    const token = jwt.sign({ tgId: user.tg_id }, JWT_SECRET, { expiresIn: TOKEN_LIFETIME });
+    const token = jwt.sign({ tgId: user.tg_id }, JWT_SECRET, { expiresIn: TOKEN_LIFETIME, algorithm: 'HS256' });
 
     // Только для админ-консоли ("посещений за 24ч") — каждый успешный вход
     // в приложение считается одним "посещением".
