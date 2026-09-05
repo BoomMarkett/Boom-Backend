@@ -857,70 +857,14 @@ app.get('/api/listings', (req, res) => {
 // покупатель платит ровно ту цену, что указана в лоте, без наценки.
 const MARKETPLACE_FEE_PERCENT = 1.5;
 
-// === Выставить лот на продажу ===
-app.post('/api/listings', requireAuth, (req, res) => {
-    const { collectionId, modelId, backdropId, symbolId, giftNumber, nftAddress, price } = req.body;
-
-    const parsedPrice = parseFloat(price);
-    if (!collectionId || !modelId || !backdropId || !symbolId || !giftNumber || !parsedPrice || parsedPrice <= 0) {
-        return res.status(400).json({ ok: false, error: 'Заполнены не все обязательные поля' });
-    }
-
-    const listing = createListing({
-        owner_tg_id: req.tgId,
-        collection_id: collectionId,
-        model_id: modelId,
-        backdrop_id: backdropId,
-        symbol_id: symbolId,
-        gift_number: giftNumber,
-        nft_address: nftAddress || null,
-        price: parsedPrice,
-    });
-
-    // Проверяем, нет ли активного ордера, который ждёт именно такой подарок —
-    // если есть, сделка исполняется мгновенно, минуя обычный флоу "выставил → кто-то купил".
-    const matchedOrder = findMatchingOrder(listing);
-    if (matchedOrder && matchedOrder.buyer_tg_id !== req.tgId) {
-        // Деньги покупателя уже зарезервированы на его балансе при создании ордера —
-        // здесь просто зачисляем продавцу выручку за вычетом комиссии.
-        const sellerPayout = listing.price * (1 - MARKETPLACE_FEE_PERCENT / 100);
-        adjustBalance(req.tgId, sellerPayout);
-
-        // Если цена лота оказалась ниже максимума, который был готов заплатить
-        // покупатель, возвращаем ему разницу.
-        const refund = matchedOrder.max_price - listing.price;
-        if (refund > 1e-9) {
-            adjustBalance(matchedOrder.buyer_tg_id, refund);
-        }
-
-        // Товар переходит покупателю и оседает в его "Хранилище" — а не просто
-        // помечается "sold" с прежним владельцем.
-        const details = getListingWithDetails(listing.id);
-        const soldListing = transferListingToBuyer(listing.id, matchedOrder.buyer_tg_id);
-        fillOrderOnce(matchedOrder.id, listing.id);
-
-        const giftSnapshot = {
-            listing_id: listing.id,
-            collection_name: details.collection_name,
-            collection_image: details.collection_image,
-            model_name: details.model_name,
-            model_image: details.model_image,
-            backdrop_name: details.backdrop_name,
-            backdrop_color: details.backdrop_color,
-            symbol_name: details.symbol_name,
-            symbol_icon: details.symbol_icon,
-            gift_number: details.gift_number,
-        };
-        createTransaction({ tg_id: matchedOrder.buyer_tg_id, type: 'buy', amount: -listing.price, ...giftSnapshot });
-        createTransaction({ tg_id: req.tgId, type: 'sell', amount: sellerPayout, ...giftSnapshot });
-
-        return res.json({ ok: true, listing: soldListing, matchedOrder: true });
-    }
-
-    res.json({ ok: true, listing });
-});
-
-// NB: раньше здесь был POST /api/inventory/add — форма, где NFT добавлялся
+// NB: раньше здесь был POST /api/listings — эндпоинт "выставить лот",
+// который создавал лот прямо из того, что прислал клиент (collectionId,
+// modelId, giftNumber и т.д.), БЕЗ проверки, что у пользователя вообще
+// есть такой подарок. Любой мог заминтить себе фейковый лот любой
+// "редкости" и продать его за настоящий TON. Фронтенд его больше не
+// вызывает (продажа теперь идёт только через переиспользование уже
+// зачисленного подарка — см. /api/listings/:id/relist ниже, там владение
+// проверяется), поэтому эндпоинт просто убран целиком, а не починен.
 // в Хранилище просто по введённым вручную названиям (без всякой проверки
 // владения). Это позволяло любому нарисовать себе сколько угодно "подарков"
 // и тут же продать их за реальный TON — критическая дыра. Единственный
