@@ -59,6 +59,8 @@ const {
     recordGiftDeposit,
     getGiftDepositByListingId,
     setListingStatus,
+    tryLockListingForWithdrawal,
+    unlockListingAfterFailedWithdrawal,
 } = require('./database');
 
 const app = express();
@@ -924,7 +926,7 @@ app.post('/api/inventory/:id/withdraw-gift', requireAuth, async (req, res) => {
         return res.status(404).json({ ok: false, error: 'Подарок не найден' });
     }
     if (listing.status !== 'owned') {
-        return res.status(400).json({ ok: false, error: 'Подарок сейчас выставлен на продажу или уже недоступен' });
+        return res.status(400).json({ ok: false, error: 'Подарок сейчас выставлен на продажу, уже выводится или недоступен' });
     }
 
     const deposit = getGiftDepositByListingId(listing.id);
@@ -940,12 +942,23 @@ app.post('/api/inventory/:id/withdraw-gift', requireAuth, async (req, res) => {
         return res.status(503).json({ ok: false, error: 'Приём/вывод подарков сейчас не настроен, попробуйте позже' });
     }
 
+    // Блокируем подарок ДО каких-либо await — с этого момента и до конца
+    // (успеха или отката) его статус 'withdrawing', а не 'owned', поэтому
+    // продать/перевыставить/отправить в трейд его больше нельзя, пока вывод
+    // не завершится. Если .changes === 0 — значит, кто-то уже успел
+    // заблокировать этот же подарок первым (двойной клик/гонка) — не
+    // повторяем вывод дважды.
+    if (!tryLockListingForWithdrawal(listing.id)) {
+        return res.status(400).json({ ok: false, error: 'Вывод этого подарка уже выполняется' });
+    }
+
     try {
         // Узнаём точную стоимость перевода в Stars (обычно 0 — бесплатно).
         const giftOnAccount = await findOwnedGiftById(connection.connection_id, deposit.owned_gift_id);
         const starCount = giftOnAccount?.transfer_star_count || 0;
 
         if (giftOnAccount && giftOnAccount.can_be_transferred === false) {
+            unlockListingAfterFailedWithdrawal(listing.id);
             return res.status(400).json({ ok: false, error: 'Telegram временно запрещает передачу этого подарка, попробуйте позже' });
         }
 
@@ -963,6 +976,7 @@ app.post('/api/inventory/:id/withdraw-gift', requireAuth, async (req, res) => {
 
         if (!transferData.ok) {
             console.error('⚠️  transferGift не удался:', transferData.description);
+            unlockListingAfterFailedWithdrawal(listing.id);
             // Самая частая причина — получатель не был активен в Telegram
             // последние 24 часа (требование самого Telegram).
             return res.status(400).json({
@@ -993,6 +1007,7 @@ app.post('/api/inventory/:id/withdraw-gift', requireAuth, async (req, res) => {
         res.json({ ok: true });
     } catch (e) {
         console.error('⚠️  Ошибка вывода подарка:', e);
+        unlockListingAfterFailedWithdrawal(listing.id);
         res.status(500).json({ ok: false, error: 'Техническая ошибка при выводе, попробуйте позже' });
     }
 });

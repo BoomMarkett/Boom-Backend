@@ -534,6 +534,30 @@ function setListingStatus(id, status) {
     return getListingById(id);
 }
 
+// === Блокировка на время вывода NFT-подарка через Telegram ===
+// Между "проверили, что подарок наш" и "реально передали его в Telegram"
+// есть два await (запрос к Bot API) — всё это время подарок раньше
+// оставался в статусе 'owned', то есть его ещё можно было успеть продать
+// или отправить в трейд, пока идёт вывод (гонка состояний). Теперь сразу,
+// одним атомарным запросом, переводим его в 'withdrawing' — статус,
+// который не проходит ни одну другую проверку "владения" (relist/buy/trade
+// везде сравнивают ровно с 'owned' или 'active'), так что все прочие
+// операции с ним автоматически отклоняются, пока вывод не завершится.
+//
+// WHERE status = 'owned' в самом запросе — это ещё и защита от гонки
+// ДВУХ одновременных попыток вывода одного и того же подарка (например,
+// двойной клик): выполнится только первая, вторая увидит .changes === 0.
+function tryLockListingForWithdrawal(id) {
+    const result = db.prepare(`UPDATE listings SET status = 'withdrawing' WHERE id = ? AND status = 'owned'`).run(id);
+    return result.changes > 0;
+}
+
+// Откат блокировки, если сам вывод не удался (Telegram отказал / ошибка сети) —
+// возвращаем подарок обратно в 'owned', чтобы им снова можно было пользоваться.
+function unlockListingAfterFailedWithdrawal(id) {
+    db.prepare(`UPDATE listings SET status = 'owned' WHERE id = ? AND status = 'withdrawing'`).run(id);
+}
+
 /**
  * Гибкая выборка активных листингов с join'ом на названия трейтов —
  * ровно то, что нужно фронту для карточек и фильтров.
@@ -1318,6 +1342,8 @@ module.exports = {
     getListingById,
     getListingWithDetails,
     setListingStatus,
+    tryLockListingForWithdrawal,
+    unlockListingAfterFailedWithdrawal,
     findListings,
     transferListingToBuyer,
     returnListingToOwnerStorage,
