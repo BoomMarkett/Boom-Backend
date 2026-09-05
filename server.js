@@ -234,17 +234,32 @@ if (!TON_WITHDRAW_MNEMONIC) {
     console.warn('⚠️  TON_WITHDRAW_MNEMONIC не задан — реальный вывод TON будет недоступен!');
 }
 
-// ADMIN_TG_ID — Telegram-id администратора площадки (узнать свой можно у
+// ADMIN_TG_ID — Telegram-id администратора(ов) площадки (узнать свой можно у
 // @userinfobot). Крупные выводы (см. WITHDRAW_MANUAL_APPROVAL_THRESHOLD
-// ниже) не отправляются автоматически — админу приходит сообщение с
-// кнопками "Одобрить"/"Отклонить" (см. handleAdminCallback), и только его
+// ниже) не отправляются автоматически — админам приходит сообщение с
+// кнопками "Одобрить"/"Отклонить" (см. handleAdminCallback), и только их
 // нажатие реально запускает перевод. Без ADMIN_TG_ID такие выводы вообще
 // не могут быть одобрены — см. обработку ниже.
-const ADMIN_TG_ID = process.env.ADMIN_TG_ID ? parseInt(process.env.ADMIN_TG_ID, 10) : null;
+//
+// Можно указать НЕСКОЛЬКО администраторов через запятую:
+//   ADMIN_TG_ID=7672317243,123456789
+// Уведомление о крупном выводе уйдёт каждому из них, а одобрить/отклонить
+// сможет любой (кто первый нажмёт — остальные увидят "уже обработано",
+// см. claimWithdrawalForProcessing).
+const ADMIN_TG_IDS = (process.env.ADMIN_TG_ID || '')
+    .split(',')
+    .map(s => parseInt(s.trim(), 10))
+    .filter(id => !isNaN(id));
+// ADMIN_TG_ID — первый из списка, оставлен для обратной совместимости там,
+// где раньше подразумевался ровно один админ (сейчас нигде, кроме проверок
+// "задан ли вообще хоть один").
+const ADMIN_TG_ID = ADMIN_TG_IDS[0] || null;
 const WITHDRAW_MANUAL_APPROVAL_THRESHOLD = 500; // TON — от этой суммы включительно нужно ручное подтверждение
 
-if (!ADMIN_TG_ID) {
+if (ADMIN_TG_IDS.length === 0) {
     console.warn(`⚠️  ADMIN_TG_ID не задан — выводы от ${WITHDRAW_MANUAL_APPROVAL_THRESHOLD} TON не смогут получить подтверждение и будут отклоняться.`);
+} else if (ADMIN_TG_IDS.length > 1) {
+    console.log(`👥 Администраторов для одобрения крупных выводов: ${ADMIN_TG_IDS.length} (${ADMIN_TG_IDS.join(', ')})`);
 }
 
 // TON_WITHDRAW_WALLET_VERSION — необязательный РУЧНОЙ override версии
@@ -520,12 +535,14 @@ async function notifyTelegram(tgId, text, photoUrl) {
 }
 
 /**
- * Уведомляет администратора о выводе, требующем ручного подтверждения —
- * с кнопками "Одобрить"/"Отклонить" (callback_data содержит id заявки,
- * обрабатывается в handleAdminCallback ниже).
+ * Уведомляет ВСЕХ администраторов из ADMIN_TG_IDS о выводе, требующем
+ * ручного подтверждения — с кнопками "Одобрить"/"Отклонить" (callback_data
+ * содержит id заявки, обрабатывается в handleAdminCallback ниже). Кто из
+ * админов первым нажмёт кнопку — тот и обработает (см.
+ * claimWithdrawalForProcessing), остальные увидят "уже обработано".
  */
 async function notifyAdminAboutWithdrawal(withdrawal, tgId, address) {
-    if (!ADMIN_TG_ID || !BOT_TOKEN) return;
+    if (ADMIN_TG_IDS.length === 0 || !BOT_TOKEN) return;
 
     const buyer = getUserByTgId(tgId);
     const who = buyer?.username ? `@${buyer.username}` : `id ${tgId}`;
@@ -543,18 +560,20 @@ async function notifyAdminAboutWithdrawal(withdrawal, tgId, address) {
         ]],
     };
 
-    try {
-        const res = await fetch(`${TELEGRAM_API_BASE}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chat_id: ADMIN_TG_ID, text, parse_mode: 'HTML', reply_markup: replyMarkup }),
-        });
-        if (!res.ok) {
-            console.error('⚠️  Не удалось уведомить администратора о выводе:', await res.text());
+    await Promise.all(ADMIN_TG_IDS.map(async (adminId) => {
+        try {
+            const res = await fetch(`${TELEGRAM_API_BASE}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ chat_id: adminId, text, parse_mode: 'HTML', reply_markup: replyMarkup }),
+            });
+            if (!res.ok) {
+                console.error(`⚠️  Не удалось уведомить администратора ${adminId} о выводе:`, await res.text());
+            }
+        } catch (e) {
+            console.error(`⚠️  Ошибка уведомления администратора ${adminId} о выводе:`, e.message);
         }
-    } catch (e) {
-        console.error('⚠️  Ошибка уведомления администратора о выводе:', e.message);
-    }
+    }));
 }
 
 async function answerCallbackQuery(callbackQueryId, text) {
@@ -589,17 +608,18 @@ async function editAdminMessage(chatId, messageId, text) {
 
 /**
  * Обрабатывает нажатие "Одобрить"/"Отклонить" под сообщением о крупном
- * выводе. Доступно ТОЛЬКО администратору (ADMIN_TG_ID) — любой другой
+ * выводе. Доступно ТОЛЬКО администраторам (ADMIN_TG_IDS) — любой другой
  * тап молча отклоняется с "Недостаточно прав". claimWithdrawalForProcessing
  * — атомарный CAS (status: awaiting_approval -> processing): если админ
- * умудрится тапнуть дважды (двойной тап, лаги Telegram), обработает
- * только первый вызов, второй увидит changes=0 и остановится сам.
+ * умудрится тапнуть дважды (двойной тап, лаги Telegram) — или два разных
+ * админа нажмут кнопку почти одновременно — обработается только первый
+ * вызов, остальные увидят changes=0 и остановятся сами.
  */
 async function handleAdminCallback(cbq) {
     const fromId = cbq.from && cbq.from.id;
     const data = cbq.data || '';
 
-    if (!ADMIN_TG_ID || fromId !== ADMIN_TG_ID) {
+    if (ADMIN_TG_IDS.length === 0 || !ADMIN_TG_IDS.includes(fromId)) {
         await answerCallbackQuery(cbq.id, 'Недостаточно прав');
         return;
     }
@@ -618,6 +638,12 @@ async function handleAdminCallback(cbq) {
     }
     if (withdrawal.status !== 'awaiting_approval') {
         await answerCallbackQuery(cbq.id, `Уже обработано (${withdrawal.status})`);
+        // При нескольких админах остальные копии этого сообщения (у других
+        // администраторов) иначе так и остались бы висеть с активными
+        // кнопками, будто решение ещё не принято — обновим и эту тоже.
+        const staleChatId = cbq.message?.chat?.id;
+        const staleMessageId = cbq.message?.message_id;
+        await editAdminMessage(staleChatId, staleMessageId, `ℹ️ Вывод #${withdrawal.id} уже обработан другим администратором (статус: ${withdrawal.status}).`);
         return;
     }
 
