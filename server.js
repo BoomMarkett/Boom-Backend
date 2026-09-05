@@ -69,6 +69,9 @@ const {
     unlockListingAfterFailedWithdrawal,
     touchUserLastSeen,
     recordBotVisit,
+    saveGameSession,
+    loadGameSession,
+    deleteGameSession,
     getAdminStats,
 } = require('./database');
 
@@ -1669,11 +1672,39 @@ const BOMBER_MIN_BET = 0.3;
 const BOMBER_MAX_BET = 1000;
 const BOMBER_HOUSE_EDGE = 0.05; // 5% комиссии площадки, зашита в множитель
 
-// Активные раунды хранятся в памяти процесса, а не в БД — раунд живёт
-// от старта до кэшаута/проигрыша, персистентность между рестартами
-// сервера для него не нужна (как и для слотов/рулетки, здесь всё решается
-// одним "заходом"). Один активный раунд на пользователя одновременно.
-const bomberActiveGames = new Map(); // tgId -> { bet, bombs, bombSet, revealed:Set, startedAt }
+// Активные раунды хранятся в БД (таблица game_sessions), а не только в
+// памяти процесса — иначе рестарт/редеплой сервера "терял" раунд (ставка
+// уже списана, а поле/этаж пропадали без возможности продолжить или вернуть
+// деньги). Один активный раунд на пользователя одновременно на каждую игру.
+// bombSet/revealed — Set, JSON их не умеет напрямую, поэтому храним как
+// массивы и конвертируем туда-обратно при загрузке/сохранении.
+const BOMBER_SESSION_TYPE = 'bomber';
+
+function bomberLoad(tgId) {
+    const saved = loadGameSession(tgId, BOMBER_SESSION_TYPE);
+    if (!saved) return null;
+    return {
+        bet: saved.bet,
+        bombs: saved.bombs,
+        bombSet: new Set(saved.bombSet),
+        revealed: new Set(saved.revealed),
+        startedAt: saved.startedAt,
+    };
+}
+
+function bomberSave(tgId, game) {
+    saveGameSession(tgId, BOMBER_SESSION_TYPE, {
+        bet: game.bet,
+        bombs: game.bombs,
+        bombSet: [...game.bombSet],
+        revealed: [...game.revealed],
+        startedAt: game.startedAt,
+    });
+}
+
+function bomberDelete(tgId) {
+    deleteGameSession(tgId, BOMBER_SESSION_TYPE);
+}
 
 function bomberFairMultiplier(bombs, picks) {
     // ∏ (N-i)/(N-bombs-i) для i=0..picks-1 — честный (без учёта комиссии)
@@ -1724,7 +1755,7 @@ app.post('/api/games/bomber/start', requireAuth, gamesLimiter, (req, res) => {
     if (!BOMBER_ALLOWED_BOMBS.includes(bombs)) {
         return res.status(400).json({ ok: false, error: 'Количество бомб должно быть 4, 6 или 8' });
     }
-    if (bomberActiveGames.has(req.tgId)) {
+    if (bomberLoad(req.tgId)) {
         return res.status(400).json({ ok: false, error: 'У вас уже есть активный раунд — завершите его (откройте ячейку или заберите выигрыш)' });
     }
 
@@ -1744,7 +1775,7 @@ app.post('/api/games/bomber/start', requireAuth, gamesLimiter, (req, res) => {
     const bombSet = new Set(positions.slice(0, bombs));
 
     const game = { bet, bombs, bombSet, revealed: new Set(), startedAt: Date.now() };
-    bomberActiveGames.set(req.tgId, game);
+    bomberSave(req.tgId, game);
 
     res.json({ ok: true, balance: user.balance, game: bomberPublicState(game) });
 });
@@ -1752,7 +1783,7 @@ app.post('/api/games/bomber/start', requireAuth, gamesLimiter, (req, res) => {
 // === Открыть ячейку ===
 app.post('/api/games/bomber/reveal', requireAuth, gamesLimiter, (req, res) => {
     const cell = parseInt(req.body.cell, 10);
-    const game = bomberActiveGames.get(req.tgId);
+    const game = bomberLoad(req.tgId);
 
     if (!game) {
         return res.status(400).json({ ok: false, error: 'Нет активного раунда — начните новую игру' });
@@ -1766,7 +1797,7 @@ app.post('/api/games/bomber/reveal', requireAuth, gamesLimiter, (req, res) => {
 
     if (game.bombSet.has(cell)) {
         // Подрыв — раунд проигран, ставка не возвращается (она уже списана при старте).
-        bomberActiveGames.delete(req.tgId);
+        bomberDelete(req.tgId);
         createTransaction({ tg_id: req.tgId, type: 'game_bomber', amount: -game.bet });
         return res.json({
             ok: true,
@@ -1785,7 +1816,7 @@ app.post('/api/games/bomber/reveal', requireAuth, gamesLimiter, (req, res) => {
         // Открыты все безопасные ячейки — автоматический кэшаут по максимальному множителю.
         const multiplier = Math.round(bomberMultiplier(game.bombs, game.revealed.size) * 100) / 100;
         const winAmount = applyGameWinFee(Math.round(game.bet * multiplier * 100) / 100);
-        bomberActiveGames.delete(req.tgId);
+        bomberDelete(req.tgId);
         const user = adjustBalance(req.tgId, winAmount);
         createTransaction({ tg_id: req.tgId, type: 'game_bomber', amount: winAmount - game.bet });
         return res.json({
@@ -1801,12 +1832,13 @@ app.post('/api/games/bomber/reveal', requireAuth, gamesLimiter, (req, res) => {
         });
     }
 
+    bomberSave(req.tgId, game);
     res.json({ ok: true, win: null, cell, game: bomberPublicState(game) });
 });
 
 // === Забрать выигрыш досрочно ===
 app.post('/api/games/bomber/cashout', requireAuth, gamesLimiter, (req, res) => {
-    const game = bomberActiveGames.get(req.tgId);
+    const game = bomberLoad(req.tgId);
     if (!game) {
         return res.status(400).json({ ok: false, error: 'Нет активного раунда' });
     }
@@ -1816,7 +1848,7 @@ app.post('/api/games/bomber/cashout', requireAuth, gamesLimiter, (req, res) => {
 
     const multiplier = Math.round(bomberMultiplier(game.bombs, game.revealed.size) * 100) / 100;
     const winAmount = applyGameWinFee(Math.round(game.bet * multiplier * 100) / 100);
-    bomberActiveGames.delete(req.tgId);
+    bomberDelete(req.tgId);
 
     const user = adjustBalance(req.tgId, winAmount);
     createTransaction({ tg_id: req.tgId, type: 'game_bomber', amount: winAmount - game.bet });
@@ -1826,7 +1858,7 @@ app.post('/api/games/bomber/cashout', requireAuth, gamesLimiter, (req, res) => {
 
 // === Текущее состояние раунда (на случай, если пользователь обновил страницу) ===
 app.get('/api/games/bomber/state', requireAuth, (req, res) => {
-    const game = bomberActiveGames.get(req.tgId);
+    const game = bomberLoad(req.tgId);
     if (!game) {
         return res.json({ ok: true, game: null });
     }
@@ -1875,10 +1907,22 @@ const TOWER_FLOORS = TOWER_FLOOR_CONFIG.length;
 const TOWER_MIN_BET = 0.3;
 const TOWER_MAX_BET = 1000;
 
-// Активные раунды хранятся в памяти процесса (как и у слотов/рулетки/бомбера) —
-// раунд живёт от старта до кэшаута/проигрыша, между рестартами сервера
-// персистентность не нужна. Один активный раунд на пользователя одновременно.
-const towerActiveGames = new Map(); // tgId -> { bet, trapsByFloor:[[...]], climbed, path:[], startedAt }
+// Активные раунды хранятся в БД (game_sessions) — см. комментарий у
+// bomberLoad/bomberSave выше, здесь та же логика. У "Башни" в состоянии нет
+// Set'ов (только числа и массивы), поэтому JSON сохраняется/читается напрямую.
+const TOWER_SESSION_TYPE = 'tower';
+
+function towerLoad(tgId) {
+    return loadGameSession(tgId, TOWER_SESSION_TYPE);
+}
+
+function towerSave(tgId, game) {
+    saveGameSession(tgId, TOWER_SESSION_TYPE, game);
+}
+
+function towerDelete(tgId) {
+    deleteGameSession(tgId, TOWER_SESSION_TYPE);
+}
 
 function towerMultiplier(floorsClimbed) {
     if (floorsClimbed <= 0) return 1;
@@ -1923,7 +1967,7 @@ app.post('/api/games/tower/start', requireAuth, gamesLimiter, (req, res) => {
             error: `Ставка должна быть от ${TOWER_MIN_BET} до ${TOWER_MAX_BET} TON, максимум с одним знаком после запятой`,
         });
     }
-    if (towerActiveGames.has(req.tgId)) {
+    if (towerLoad(req.tgId)) {
         return res.status(400).json({ ok: false, error: 'У вас уже есть активный раунд — завершите его (выберите плитку или заберите выигрыш)' });
     }
 
@@ -1937,7 +1981,7 @@ app.post('/api/games/tower/start', requireAuth, gamesLimiter, (req, res) => {
     const trapsByFloor = TOWER_FLOOR_CONFIG.map(cfg => towerGenerateFloorTraps(cfg.tiles, cfg.traps));
 
     const game = { bet, trapsByFloor, climbed: 0, path: [], startedAt: Date.now() };
-    towerActiveGames.set(req.tgId, game);
+    towerSave(req.tgId, game);
 
     res.json({ ok: true, balance: user.balance, game: towerPublicState(game) });
 });
@@ -1945,7 +1989,7 @@ app.post('/api/games/tower/start', requireAuth, gamesLimiter, (req, res) => {
 // === Выбрать плитку на текущем этаже ===
 app.post('/api/games/tower/pick', requireAuth, gamesLimiter, (req, res) => {
     const tile = parseInt(req.body.tile, 10);
-    const game = towerActiveGames.get(req.tgId);
+    const game = towerLoad(req.tgId);
 
     if (!game) {
         return res.status(400).json({ ok: false, error: 'Нет активного раунда — начните новую игру' });
@@ -1961,7 +2005,7 @@ app.post('/api/games/tower/pick', requireAuth, gamesLimiter, (req, res) => {
 
     if (floorTraps.includes(tile)) {
         // Ловушка — раунд проигран, ставка не возвращается (она уже списана при старте).
-        towerActiveGames.delete(req.tgId);
+        towerDelete(req.tgId);
         createTransaction({ tg_id: req.tgId, type: 'game_tower', amount: -game.bet });
         return res.json({
             ok: true,
@@ -1982,7 +2026,7 @@ app.post('/api/games/tower/pick', requireAuth, gamesLimiter, (req, res) => {
         // Пройдены все этажи — автоматический кэшаут по максимальному множителю.
         const multiplier = Math.round(towerMultiplier(game.climbed) * 100) / 100;
         const winAmount = applyGameWinFee(Math.round(game.bet * multiplier * 100) / 100);
-        towerActiveGames.delete(req.tgId);
+        towerDelete(req.tgId);
         const user = adjustBalance(req.tgId, winAmount);
         createTransaction({ tg_id: req.tgId, type: 'game_tower', amount: winAmount - game.bet });
         return res.json({
@@ -1998,12 +2042,13 @@ app.post('/api/games/tower/pick', requireAuth, gamesLimiter, (req, res) => {
         });
     }
 
+    towerSave(req.tgId, game);
     res.json({ ok: true, win: null, floor, tile, game: towerPublicState(game) });
 });
 
 // === Забрать выигрыш досрочно ===
 app.post('/api/games/tower/cashout', requireAuth, gamesLimiter, (req, res) => {
-    const game = towerActiveGames.get(req.tgId);
+    const game = towerLoad(req.tgId);
     if (!game) {
         return res.status(400).json({ ok: false, error: 'Нет активного раунда' });
     }
@@ -2013,7 +2058,7 @@ app.post('/api/games/tower/cashout', requireAuth, gamesLimiter, (req, res) => {
 
     const multiplier = Math.round(towerMultiplier(game.climbed) * 100) / 100;
     const winAmount = applyGameWinFee(Math.round(game.bet * multiplier * 100) / 100);
-    towerActiveGames.delete(req.tgId);
+    towerDelete(req.tgId);
 
     const user = adjustBalance(req.tgId, winAmount);
     createTransaction({ tg_id: req.tgId, type: 'game_tower', amount: winAmount - game.bet });
@@ -2023,7 +2068,7 @@ app.post('/api/games/tower/cashout', requireAuth, gamesLimiter, (req, res) => {
 
 // === Текущее состояние раунда (на случай, если пользователь обновил страницу) ===
 app.get('/api/games/tower/state', requireAuth, (req, res) => {
-    const game = towerActiveGames.get(req.tgId);
+    const game = towerLoad(req.tgId);
     if (!game) {
         return res.json({ ok: true, game: null });
     }

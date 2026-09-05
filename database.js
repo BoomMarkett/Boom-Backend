@@ -284,6 +284,21 @@ db.exec(`
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_bot_visits_created_at ON bot_visits(created_at);
+
+    -- Активные раунды игр казино (сейчас: 'bomber', 'tower') — раньше жили
+    -- только в памяти процесса (Map в server.js), из-за чего рестарт/редеплой
+    -- сервера "терял" раунд: ставка уже списана, а само поле/этаж пропадали
+    -- без возможности продолжить или вернуть деньги. Теперь раунд переживает
+    -- рестарт — при следующем запросе он просто подгружается отсюда.
+    -- Один активный раунд на пользователя на КАЖДЫЙ тип игры одновременно
+    -- (можно одновременно иметь открытый "Бомбер" и "Башню").
+    CREATE TABLE IF NOT EXISTS game_sessions (
+        tg_id INTEGER NOT NULL REFERENCES users(tg_id),
+        game_type TEXT NOT NULL,
+        state_json TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (tg_id, game_type)
+    );
 `);
 
 // === Подготовленные запросы: пользователи ===
@@ -349,6 +364,33 @@ function touchUserLastSeen(tgId) {
 const recordBotVisitStmt = db.prepare('INSERT INTO bot_visits (tg_id) VALUES (?)');
 function recordBotVisit(tgId) {
     recordBotVisitStmt.run(tgId);
+}
+
+// === Активные раунды игр (переживают рестарт сервера — см. комментарий у
+// CREATE TABLE game_sessions выше). Состояние хранится как JSON-строка —
+// вызывающий код (server.js) сам решает, что в нём лежит и как его
+// сериализовать (например, Set нужно превратить в массив перед сохранением). ===
+const gameSessionStatements = {
+    upsert: db.prepare(`
+        INSERT INTO game_sessions (tg_id, game_type, state_json)
+        VALUES (?, ?, ?)
+        ON CONFLICT(tg_id, game_type) DO UPDATE SET state_json = excluded.state_json
+    `),
+    find: db.prepare('SELECT state_json FROM game_sessions WHERE tg_id = ? AND game_type = ?'),
+    remove: db.prepare('DELETE FROM game_sessions WHERE tg_id = ? AND game_type = ?'),
+};
+
+function saveGameSession(tgId, gameType, state) {
+    gameSessionStatements.upsert.run(tgId, gameType, JSON.stringify(state));
+}
+
+function loadGameSession(tgId, gameType) {
+    const row = gameSessionStatements.find.get(tgId, gameType);
+    return row ? JSON.parse(row.state_json) : null;
+}
+
+function deleteGameSession(tgId, gameType) {
+    gameSessionStatements.remove.run(tgId, gameType);
 }
 
 // "Онлайн сейчас" — активность (любой авторизованный запрос) за последние
@@ -1541,5 +1583,8 @@ module.exports = {
     getGiftDepositByListingId,
     touchUserLastSeen,
     recordBotVisit,
+    saveGameSession,
+    loadGameSession,
+    deleteGameSession,
     getAdminStats,
 };
