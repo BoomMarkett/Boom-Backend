@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
 const { TonClient, WalletContractV3R2, WalletContractV4, WalletContractV5R1, internal } = require('@ton/ton');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
 const { Address, toNano } = require('@ton/core');
@@ -68,6 +69,92 @@ const {
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// =====================================================================
+// RATE LIMITING
+// Без этого /api/auth, /api/withdraw и /api/games/* можно было долбить без
+// ограничений — не даёт напрямую что-то украсть (проверки баланса/подписи
+// всё равно на месте), но это открытая дверь для DoS и способ упереться в
+// лимиты TonAPI/TonCenter (депозиты/вывод дергают их на каждый запрос).
+//
+// Ключуем по tgId, когда он уже известен (после requireAuth) — это честнее
+// IP для Telegram, где много пользователей могут сидеть за одним IP/прокси.
+// Для /api/auth (до авторизации) ключ — IP, там иначе никак.
+// =====================================================================
+
+function rateLimitKey(req) {
+    return req.tgId ? `tg:${req.tgId}` : req.ip;
+}
+
+function rateLimitHandler(req, res) {
+    res.status(429).json({ ok: false, error: 'Слишком много запросов, попробуйте чуть позже' });
+}
+
+// Общий фоновый лимит на все /api/* — защита по умолчанию для ручек, у
+// которых нет своего отдельного лимитера ниже.
+const generalApiLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 120,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: rateLimitKey,
+    handler: rateLimitHandler,
+});
+app.use('/api/', generalApiLimiter);
+
+// /api/auth — вход по Telegram initData. Ключ по IP (пользователь ещё не
+// авторизован), лимит жёстче — это защита от перебора/спама HMAC-проверки.
+const authLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    limit: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: rateLimitHandler,
+});
+
+// /api/withdraw — самая чувствительная ручка (реальные деньги с горячего
+// кошелька). Жёсткий лимит по tgId.
+const withdrawLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    limit: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: rateLimitKey,
+    handler: rateLimitHandler,
+});
+
+// /api/deposit/init — создание заявки на депозит.
+const depositInitLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    limit: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: rateLimitKey,
+    handler: rateLimitHandler,
+});
+
+// /api/deposit/:id/status — фронт поллит её раз в 4 сек, пока ждёт
+// подтверждения перевода в блокчейне (см. app.js pollDepositStatus), так что
+// лимит даёт заметный запас сверх обычного использования.
+const depositStatusLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 30,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: rateLimitKey,
+    handler: rateLimitHandler,
+});
+
+// /api/games/* — не даёт скриптом задалбливать спины/раунды быстрее, чем
+// физически может кликать человек.
+const gamesLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 60,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: rateLimitKey,
+    handler: rateLimitHandler,
+});
 
 const BOT_TOKEN = process.env.BOT_TOKEN || '';
 const JWT_SECRET = process.env.JWT_SECRET || '';
@@ -626,7 +713,7 @@ function requireAuth(req, res, next) {
 }
 
 // === Авторизация: проверяем подпись Telegram, сохраняем пользователя, выдаём JWT ===
-app.post('/api/auth', (req, res) => {
+app.post('/api/auth', authLimiter, (req, res) => {
     const { initData } = req.body;
 
     if (!initData) {
@@ -708,7 +795,7 @@ const DEPOSIT_AMOUNT_TOLERANCE_TON = 0.001; // допуск на погрешн�
 
 // === Создать заявку на пополнение — возвращает адрес и memo, которые нужно
 // передать в TonConnect-транзакцию на клиенте ===
-app.post('/api/deposit/init', requireAuth, (req, res) => {
+app.post('/api/deposit/init', requireAuth, depositInitLimiter, (req, res) => {
     if (!TON_DEPOSIT_ADDRESS) {
         return res.status(503).json({ ok: false, error: 'Пополнение временно недоступно — обратитесь в поддержку' });
     }
@@ -762,7 +849,7 @@ async function findTonDepositTransfer(memo, expectedAmount) {
 
 // === Проверить статус заявки на пополнение — клиент опрашивает этот
 // эндпоинт после отправки транзакции, пока не получит 'confirmed' ===
-app.get('/api/deposit/:id/status', requireAuth, async (req, res) => {
+app.get('/api/deposit/:id/status', requireAuth, depositStatusLimiter, async (req, res) => {
     const deposit = getDepositById(parseInt(req.params.id, 10));
     if (!deposit || deposit.tg_id !== req.tgId) {
         return res.status(404).json({ ok: false, error: 'Заявка на пополнение не найдена' });
@@ -816,7 +903,7 @@ app.get('/api/deposit/:id/status', requireAuth, async (req, res) => {
 });
 
 // === Вывод средств (реальный перевод TON на кошелёк пользователя) ===
-app.post('/api/withdraw', requireAuth, async (req, res) => {
+app.post('/api/withdraw', requireAuth, withdrawLimiter, async (req, res) => {
     const amount = parseFloat(req.body.amount);
     const addressRaw = String(req.body.address || '').trim();
 
@@ -1139,7 +1226,7 @@ function spinReel() {
 // === Крутануть слоты: ставка списывается сразу, выигрыш (если есть)
 // начисляется в этом же ответе — считаем всё на сервере, чтобы клиент
 // не мог подделать результат или множитель ===
-app.post('/api/games/slots/spin', requireAuth, (req, res) => {
+app.post('/api/games/slots/spin', requireAuth, gamesLimiter, (req, res) => {
     const bet = parseFloat(req.body.bet);
 
     if (!isValidAmount(bet, SLOTS_MIN_BET, SLOTS_MAX_BET)) {
@@ -1212,7 +1299,7 @@ function spinRoulette() {
 
 // === Крутануть рулетку: аналогично слотам — весь расчёт на сервере,
 // клиент только проигрывает анимацию по присланному результату ===
-app.post('/api/games/roulette/spin', requireAuth, (req, res) => {
+app.post('/api/games/roulette/spin', requireAuth, gamesLimiter, (req, res) => {
     const bet = parseFloat(req.body.bet);
 
     if (!isValidAmount(bet, ROULETTE_MIN_BET, ROULETTE_MAX_BET)) {
@@ -1319,7 +1406,7 @@ function bomberPublicState(game) {
 }
 
 // === Начать раунд: списываем ставку сразу (резерв), генерируем бомбы ===
-app.post('/api/games/bomber/start', requireAuth, (req, res) => {
+app.post('/api/games/bomber/start', requireAuth, gamesLimiter, (req, res) => {
     const bet = parseFloat(req.body.bet);
     const bombs = parseInt(req.body.bombs, 10);
 
@@ -1358,7 +1445,7 @@ app.post('/api/games/bomber/start', requireAuth, (req, res) => {
 });
 
 // === Открыть ячейку ===
-app.post('/api/games/bomber/reveal', requireAuth, (req, res) => {
+app.post('/api/games/bomber/reveal', requireAuth, gamesLimiter, (req, res) => {
     const cell = parseInt(req.body.cell, 10);
     const game = bomberActiveGames.get(req.tgId);
 
@@ -1413,7 +1500,7 @@ app.post('/api/games/bomber/reveal', requireAuth, (req, res) => {
 });
 
 // === Забрать выигрыш досрочно ===
-app.post('/api/games/bomber/cashout', requireAuth, (req, res) => {
+app.post('/api/games/bomber/cashout', requireAuth, gamesLimiter, (req, res) => {
     const game = bomberActiveGames.get(req.tgId);
     if (!game) {
         return res.status(400).json({ ok: false, error: 'Нет активного раунда' });
@@ -1522,7 +1609,7 @@ function towerGenerateFloorTraps(tiles, traps) {
 }
 
 // === Начать раунд: списываем ставку сразу (резерв), расставляем ловушки ===
-app.post('/api/games/tower/start', requireAuth, (req, res) => {
+app.post('/api/games/tower/start', requireAuth, gamesLimiter, (req, res) => {
     const bet = parseFloat(req.body.bet);
 
     if (!isValidAmount(bet, TOWER_MIN_BET, TOWER_MAX_BET)) {
@@ -1551,7 +1638,7 @@ app.post('/api/games/tower/start', requireAuth, (req, res) => {
 });
 
 // === Выбрать плитку на текущем этаже ===
-app.post('/api/games/tower/pick', requireAuth, (req, res) => {
+app.post('/api/games/tower/pick', requireAuth, gamesLimiter, (req, res) => {
     const tile = parseInt(req.body.tile, 10);
     const game = towerActiveGames.get(req.tgId);
 
@@ -1610,7 +1697,7 @@ app.post('/api/games/tower/pick', requireAuth, (req, res) => {
 });
 
 // === Забрать выигрыш досрочно ===
-app.post('/api/games/tower/cashout', requireAuth, (req, res) => {
+app.post('/api/games/tower/cashout', requireAuth, gamesLimiter, (req, res) => {
     const game = towerActiveGames.get(req.tgId);
     if (!game) {
         return res.status(400).json({ ok: false, error: 'Нет активного раунда' });
@@ -1654,7 +1741,7 @@ const DICE_PAYOUT_MULTIPLIER = 3;
 
 // === Бросить кубик: всё считается на сервере за один запрос — ставка
 // списывается и выигрыш (если есть) начисляется в этом же ответе ===
-app.post('/api/games/dice/roll', requireAuth, (req, res) => {
+app.post('/api/games/dice/roll', requireAuth, gamesLimiter, (req, res) => {
     const bet = parseFloat(req.body.bet);
     const number = parseInt(req.body.number, 10);
 
@@ -1753,7 +1840,7 @@ function plinkoGeneratePath(targetIndex) {
 
 // === Бросить шарик: корзина выбирается по весовой таблице, путь для
 // анимации на клиенте генерируется отдельно и лишь визуально ведёт к ней ===
-app.post('/api/games/plinko/drop', requireAuth, (req, res) => {
+app.post('/api/games/plinko/drop', requireAuth, gamesLimiter, (req, res) => {
     const bet = parseFloat(req.body.bet);
 
     if (!isValidAmount(bet, PLINKO_MIN_BET, PLINKO_MAX_BET)) {
