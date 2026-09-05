@@ -740,7 +740,21 @@ app.get('/api/deposit/:id/status', requireAuth, async (req, res) => {
             return res.json({ ok: true, status: 'pending' });
         }
 
-        confirmDeposit(deposit.id, match.txHash || `memo:${deposit.memo}:${Date.now()}`);
+        // confirmDeposit — атомарный: если два параллельных запроса поллинга
+        // пересеклись по времени и оба дошли досюда, "застолбить" депозит
+        // (перевести из 'pending' в 'confirmed') сможет только ОДИН из них.
+        // Проигравший получает claimed: false и НЕ должен зачислять баланс
+        // повторно — иначе один и тот же реальный перевод задвоился бы.
+        // Отдаём проигравшему реальный текущий статус депозита (обычно
+        // 'confirmed' — победитель уже его выставил, но на всякий случай не
+        // хардкодим: теоретически в этом же окне depozит мог быть помечен
+        // 'expired' другим параллельным запросом).
+        const { deposit: current, claimed } = confirmDeposit(deposit.id, match.txHash || `memo:${deposit.memo}:${Date.now()}`);
+        if (!claimed) {
+            const user = getUserByTgId(req.tgId);
+            return res.json({ ok: true, status: current.status, balance: user.balance });
+        }
+
         const user = adjustBalance(req.tgId, deposit.amount);
         createTransaction({ tg_id: req.tgId, type: 'deposit', amount: deposit.amount });
 

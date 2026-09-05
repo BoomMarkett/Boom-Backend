@@ -688,7 +688,7 @@ const depositStatements = {
     findById: db.prepare('SELECT * FROM deposits WHERE id = ?'),
     findByMemo: db.prepare('SELECT * FROM deposits WHERE memo = ?'),
     findByTxHash: db.prepare('SELECT * FROM deposits WHERE tx_hash = ?'),
-    confirm: db.prepare(`UPDATE deposits SET status = 'confirmed', tx_hash = ?, confirmed_at = datetime('now') WHERE id = ?`),
+    confirm: db.prepare(`UPDATE deposits SET status = 'confirmed', tx_hash = ?, confirmed_at = datetime('now') WHERE id = ? AND status = 'pending'`),
     expire: db.prepare(`UPDATE deposits SET status = 'expired' WHERE id = ?`),
 };
 
@@ -709,9 +709,17 @@ function getDepositByTxHash(txHash) {
     return depositStatements.findByTxHash.get(txHash);
 }
 
+// Депозит подтверждается атомарно: WHERE status = 'pending' в самом
+// UPDATE — это защита от гонки, когда фронт поллит этот статус и два
+// запроса на подтверждение одного и того же депозита пересекаются по
+// времени. Раньше проверка "уже засчитан?" и само зачисление баланса были
+// раздельными шагами — оба параллельных запроса могли увидеть "ещё не
+// засчитан" и оба начислить баланс. Теперь "застолбить" депозит может
+// только ОДИН запрос — возвращаем claimed: true/false, чтобы вызывающий
+// код начислял баланс только тому, кто реально выиграл гонку.
 function confirmDeposit(id, txHash) {
-    depositStatements.confirm.run(txHash, id);
-    return getDepositById(id);
+    const result = depositStatements.confirm.run(txHash, id);
+    return { deposit: getDepositById(id), claimed: result.changes > 0 };
 }
 
 function expireDeposit(id) {
