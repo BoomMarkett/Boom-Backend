@@ -28,6 +28,8 @@ const {
     getDepositByTxHash,
     confirmDeposit,
     expireDeposit,
+    createWithdrawalRecord,
+    resolveWithdrawal,
     createOrder,
     getOrderById,
     getOrderWithDetails,
@@ -238,6 +240,32 @@ function getHotWallet() {
 }
 
 /**
+ * Отдельный тип ошибки для "неоднозначного" исхода: транзакция реально
+ * отправлена в сеть, но подтверждение (рост seqno) не пришло за отведённое
+ * время. Это НЕ значит, что перевод не прошёл — просто мы не дождались
+ * ответа сети. Отличаем от обычных ошибок (недостаточно TON на горячем
+ * кошельке, неверный адрес и т.п.), которые происходят ДО отправки в сеть,
+ * и там точно безопасно вернуть баланс — здесь так делать нельзя.
+ */
+class WithdrawalConfirmationTimeout extends Error {}
+
+// Все выводы с горячего кошелька идут строго по одному, а не параллельно.
+// Причина: sendTonWithdrawal определяет успех/неудачу СВОЕЙ транзакции по
+// росту seqno кошелька. Если бы два вывода шли одновременно, оба прочитали
+// бы один и тот же seqno "до", и рост seqno от ЧУЖОЙ (второй) транзакции
+// мог бы быть ошибочно принят за подтверждение ПЕРВОЙ — то есть кошелёк
+// решил бы, что перевод прошёл, хотя на самом деле подтвердился другой.
+// Сериализация полностью убирает эту двусмысленность.
+let withdrawalQueueTail = Promise.resolve();
+function runSerializedWithdrawal(taskFn) {
+    const result = withdrawalQueueTail.then(taskFn, taskFn);
+    // Хвост очереди всегда должен "успешно" разрешиться (даже если сама
+    // задача упала), иначе следующий вывод в очереди никогда не начнётся.
+    withdrawalQueueTail = result.then(() => {}, () => {});
+    return result;
+}
+
+/**
  * Подписывает и реально отправляет TON с горячего кошелька площадки на
  * адрес пользователя. Ждём роста seqno кошелька как подтверждения, что
  * сеть приняла транзакцию — сама транзакция уже не отменяется на этом
@@ -280,7 +308,7 @@ async function sendTonWithdrawal(toAddress, amountTon, commentText) {
         if (seqnoNow > seqnoBefore) return;
     }
 
-    throw new Error('Транзакция отправлена, но подтверждение не пришло вовремя');
+    throw new WithdrawalConfirmationTimeout('Транзакция отправлена, но подтверждение не пришло вовремя');
 }
 
 /** "Chill Flame #433898" — как называют подарок в самом Telegram. */
@@ -790,8 +818,9 @@ app.post('/api/withdraw', requireAuth, async (req, res) => {
 
     // Списываем баланс СРАЗУ, до отправки на блокчейн — иначе повторный
     // запрос, отправленный за секунду до первого ответа, мог бы списать
-    // ту же сумму дважды. Если сама отправка ниже провалится — вернём
-    // деньги обратно на баланс.
+    // ту же сумму дважды. Возвращаем деньги обратно ТОЛЬКО если перевод
+    // точно не ушёл в сеть (см. ниже про WithdrawalConfirmationTimeout —
+    // это единственный случай, когда рефанд был бы небезопасен).
     let user;
     try {
         user = adjustBalance(req.tgId, -amount);
@@ -799,13 +828,36 @@ app.post('/api/withdraw', requireAuth, async (req, res) => {
         return res.status(400).json({ ok: false, error: e.message });
     }
 
+    const withdrawalRecord = createWithdrawalRecord(req.tgId, amount, addressRaw);
+
     try {
-        await sendTonWithdrawal(toAddress, amount, 'BoomMarket withdraw');
+        // Строго по одному с горячего кошелька — см. комментарий у
+        // runSerializedWithdrawal/WithdrawalConfirmationTimeout выше.
+        await runSerializedWithdrawal(() => sendTonWithdrawal(toAddress, amount, 'BoomMarket withdraw'));
         createTransaction({ tg_id: req.tgId, type: 'withdraw', amount: -amount });
+        resolveWithdrawal(withdrawalRecord.id, 'completed');
         res.json({ ok: true, balance: user.balance });
     } catch (e) {
         console.error(`⚠️  Ошибка вывода TON пользователю ${req.tgId} (сумма ${amount}, адрес ${addressRaw}):`, e.message);
         console.error(e.stack);
+
+        if (e instanceof WithdrawalConfirmationTimeout) {
+            // Перевод РЕАЛЬНО был отправлен в сеть — мы просто не дождались
+            // подтверждения. Возвращать баланс здесь нельзя: если транзакция
+            // всё же подтвердится позже, пользователь получит и деньги на
+            // карте, и TON на кошельке — двойная выплата. Оставляем баланс
+            // списанным и помечаем вывод как требующий ручной проверки.
+            resolveWithdrawal(withdrawalRecord.id, 'needs_review', e.message);
+            return res.status(202).json({
+                ok: false,
+                pending: true,
+                error: 'Перевод отправлен в сеть, подтверждение задерживается. Баланс временно списан — если TON не придёт в течение 15–20 минут, обратитесь в поддержку (укажите сумму и время).',
+            });
+        }
+
+        // Любая другая ошибка (недостаточно TON на горячем кошельке,
+        // и т.п.) происходит ДО отправки в сеть — возвращать баланс безопасно.
+        resolveWithdrawal(withdrawalRecord.id, 'failed', e.message);
         const restored = adjustBalance(req.tgId, amount);
         res.status(500).json({
             ok: false,

@@ -197,6 +197,25 @@ db.exec(`
 
     CREATE INDEX IF NOT EXISTS idx_deposits_tg_id ON deposits(tg_id, status);
 
+    -- Вывод TON пользователю. status='needs_review' — особый случай: сама
+    -- транзакция была отправлена в сеть, но подтверждение не пришло за
+    -- отведённое время — неизвестно, реально ли она прошла. Баланс в этом
+    -- случае НЕ возвращается автоматически (иначе при последующем реальном
+    -- подтверждении на блокчейне получился бы задвоенный вывод) — запись
+    -- просто ждёт ручной проверки администратором по адресу/сумме/времени.
+    CREATE TABLE IF NOT EXISTS withdrawals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tg_id INTEGER NOT NULL REFERENCES users(tg_id),
+        amount REAL NOT NULL,
+        address TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending', -- pending | completed | failed | needs_review
+        note TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        resolved_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_withdrawals_tg_id ON withdrawals(tg_id, status);
+
     -- Business-подключение бота к личному Telegram-аккаунту, на который люди
     -- присылают подарки. connection_id нужен, чтобы позже вызывать
     -- getBusinessAccountGifts / transferGift от имени этого аккаунта.
@@ -725,6 +744,25 @@ function confirmDeposit(id, txHash) {
 function expireDeposit(id) {
     depositStatements.expire.run(id);
     return getDepositById(id);
+}
+
+// === Подготовленные запросы: выводы TON ===
+const withdrawalStatements = {
+    insert: db.prepare(`INSERT INTO withdrawals (tg_id, amount, address) VALUES (?, ?, ?)`),
+    findById: db.prepare('SELECT * FROM withdrawals WHERE id = ?'),
+    resolve: db.prepare(`
+        UPDATE withdrawals SET status = ?, note = ?, resolved_at = datetime('now') WHERE id = ?
+    `),
+};
+
+function createWithdrawalRecord(tgId, amount, address) {
+    const info = withdrawalStatements.insert.run(tgId, amount, address);
+    return withdrawalStatements.findById.get(info.lastInsertRowid);
+}
+
+function resolveWithdrawal(id, status, note = null) {
+    withdrawalStatements.resolve.run(status, note, id);
+    return withdrawalStatements.findById.get(id);
 }
 
 // === Подготовленные запросы: ордера на покупку ===
@@ -1365,6 +1403,8 @@ module.exports = {
     getDepositByTxHash,
     confirmDeposit,
     expireDeposit,
+    createWithdrawalRecord,
+    resolveWithdrawal,
     createOrder,
     hasOwnMatchingListing,
     getOrderById,
