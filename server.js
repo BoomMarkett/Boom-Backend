@@ -911,7 +911,7 @@ function checkTelegramAuth(initData) {
             .update(dataCheckString)
             .digest('hex');
 
-        if (calculatedHash !== hash) return false;
+        if (!isSecretMatch(hash, calculatedHash)) return false;
 
         // Доп. защита: initData подписан Telegram корректно, но сам он мог
         // "утечь" (логи, история браузера и т.п.) и быть переигран позже.
@@ -2265,15 +2265,26 @@ app.post('/api/orders', requireAuth, (req, res) => {
         return res.status(400).json({ ok: false, error: 'Недостаточно средств на балансе' });
     }
 
-    const order = createOrder({
-        buyer_tg_id: req.tgId,
-        collection_id: collectionId,
-        model_id: modelId || null,
-        backdrop_id: backdropId || null,
-        symbol_id: symbolId || null,
-        max_price: parsedPrice,
-        quantity: parsedQuantity,
-    });
+    let order;
+    try {
+        order = createOrder({
+            buyer_tg_id: req.tgId,
+            collection_id: collectionId,
+            model_id: modelId || null,
+            backdrop_id: backdropId || null,
+            symbol_id: symbolId || null,
+            max_price: parsedPrice,
+            quantity: parsedQuantity,
+        });
+    } catch (e) {
+        // Скорее всего collectionId/modelId/backdropId/symbolId не существуют
+        // (устаревший кэш на фронте, битый запрос и т.п.) — деньги уже
+        // списаны выше, обязательно возвращаем их, иначе они просто
+        // пропадут без созданного ордера.
+        console.error('⚠️  Не удалось создать ордер (вероятно, некорректные id):', e.message);
+        adjustBalance(req.tgId, totalReserve);
+        return res.status(400).json({ ok: false, error: 'Не удалось создать ордер — проверьте выбранные коллекцию/трейты' });
+    }
 
     // Уведомляем владельцев всех подходящих активных лотов — им кинули
     // новое предложение на их подарок (совпадение по трейтам, необязательно
