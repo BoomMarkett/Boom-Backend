@@ -72,12 +72,22 @@ app.use(express.json());
 const BOT_TOKEN = process.env.BOT_TOKEN || '';
 const JWT_SECRET = process.env.JWT_SECRET || '';
 
-if (!BOT_TOKEN) {
-    console.warn('⚠️  BOT_TOKEN не задан — авторизация всегда будет отклоняться!');
-}
-
-if (!JWT_SECRET) {
-    console.warn('⚠️  JWT_SECRET не задан — выдача токенов сессии всегда будет отклоняться!');
+// КРИТИЧНО: раньше отсутствие BOT_TOKEN/JWT_SECRET только логировалось
+// предупреждением, а сервер продолжал работать. На деле это означало, что
+// /api/auth подписывал бы JWT пустой строкой в качестве секрета — а значит
+// ЛЮБОЙ человек в интернете (без всякого доступа к Telegram) мог бы сам
+// сгенерировать себе валидный токен с ЧУЖИМ tgId (например, известного
+// пользователя с крупным балансом) через обычный jwt.sign({tgId}, '') и
+// делать от его имени вообще всё — выводить деньги, продавать подарки и т.д.
+// Похожая дыра была и с BOT_TOKEN: пустой токен даёт вычисляемый (не
+// секретный) HMAC-ключ в checkTelegramAuth, то есть подделать initData тоже
+// стало бы тривиально. Останавливаем процесс полностью, а не тихо
+// деградируем — таким переменным ПРОСТО НЕЛЬЗЯ быть пустыми в проде.
+if (!BOT_TOKEN || !JWT_SECRET) {
+    console.error('⛔ BOT_TOKEN и/или JWT_SECRET не заданы — сервер отказывается запускаться.');
+    console.error('   Без них аутентификация небезопасна (возможна полная подделка чужой личности).');
+    console.error('   Задайте оба значения в переменных окружения и перезапустите сервер.');
+    process.exit(1);
 }
 
 // === Реальные TON-пополнения ===
@@ -575,7 +585,18 @@ function checkTelegramAuth(initData) {
             .update(dataCheckString)
             .digest('hex');
 
-        return calculatedHash === hash;
+        if (calculatedHash !== hash) return false;
+
+        // Доп. защита: initData подписан Telegram корректно, но сам он мог
+        // "утечь" (логи, история браузера и т.п.) и быть переигран позже.
+        // Официально Telegram советует не принимать initData старше суток —
+        // делаем то же самое, благо auth_date как раз для этого и передаётся.
+        const authDate = parseInt(params.get('auth_date'), 10);
+        if (!authDate || Date.now() / 1000 - authDate > 86400) {
+            return false;
+        }
+
+        return true;
     } catch (e) {
         console.error('Ошибка проверки:', e);
         return false;
