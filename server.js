@@ -7,6 +7,7 @@ const rateLimit = require('express-rate-limit');
 const { TonClient, WalletContractV3R2, WalletContractV4, WalletContractV5R1, internal } = require('@ton/ton');
 const { mnemonicToPrivateKey } = require('@ton/crypto');
 const { Address, toNano } = require('@ton/core');
+const { isUserbotConfigured, transferGiftViaUserbot } = require('./userbot');
 const {
     findOrCreateUser,
     getUserByTgId,
@@ -519,6 +520,16 @@ if (!BUSINESS_ACCOUNT_USERNAME) {
 app.get('/api/deposit-nft-info', (req, res) => {
     res.json({ ok: true, username: BUSINESS_ACCOUNT_USERNAME });
 });
+
+// Курс конвертации Stars → TON, используется ТОЛЬКО для того, чтобы переложить
+// на пользователя комиссию Telegram за перевод подарка (transfer_star_count у
+// части подарков не 0 — см. блок "ВЫВОД ПОДАРКА-NFT" ниже). Официального
+// живого курса Stars/TON от Telegram нет, курс держим настройкой и обновляем
+// руками по мере надобности (см. Fragment/маркеты Stars для ориентира).
+// Дефолт — грубая оценка, ОБЯЗАТЕЛЬНО подставь актуальное значение через
+// переменную окружения STAR_TO_TON_RATE на Railway.
+const STAR_TO_TON_RATE = parseFloat(process.env.STAR_TO_TON_RATE) || 0.0025;
+
 // URL мини-приложения — тот же, что в tonconnect-manifest.json.
 const MINI_APP_URL = process.env.MINI_APP_URL || 'https://boommarkett.github.io/BoomMarket/';
 
@@ -869,7 +880,7 @@ async function creditIncomingGift(message) {
         status: 'owned',
     });
 
-    recordGiftDeposit(ownedGiftId, depositUser.tg_id, listing.id);
+    recordGiftDeposit(ownedGiftId, depositUser.tg_id, listing.id, gift.name || null);
 
     console.log(`✅ Зачислен подарок "${gift.base_name} #${gift.number}" пользователю ${depositUser.tg_id}`);
 
@@ -1036,6 +1047,29 @@ function requireAdmin(req, res, next) {
 
 app.get('/api/admin/stats', requireAuth, requireAdmin, (req, res) => {
     res.json({ ok: true, stats: getAdminStats() });
+});
+
+// === Адрес и баланс горячего кошелька для выводов — без этого узнать его
+// можно было только по логам ПОСЛЕ первого реального вывода (кошелёк
+// поднимается лениво, см. getHotWallet выше). Эта ручка форсирует то же
+// самое определение версии/адреса, но не отправляет никаких переводов —
+// безопасно дёргать в любой момент, просто чтобы посмотреть. ===
+app.get('/api/admin/wallet-info', requireAuth, requireAdmin, async (req, res) => {
+    if (!TON_WITHDRAW_MNEMONIC) {
+        return res.status(400).json({ ok: false, error: 'TON_WITHDRAW_MNEMONIC не задан' });
+    }
+    try {
+        const { client, address } = await getHotWallet();
+        const balanceNano = await client.getBalance(address);
+        res.json({
+            ok: true,
+            address: address.toString({ bounceable: false }),
+            balanceTon: Number(balanceNano) / 1e9,
+        });
+    } catch (e) {
+        console.error('⚠️  Не удалось получить информацию о горячем кошельке:', e);
+        res.status(500).json({ ok: false, error: e.message || 'Не удалось получить информацию о кошельке' });
+    }
 });
 
 // === Пополнение баланса ===
@@ -1401,6 +1435,47 @@ async function findOwnedGiftById(businessConnectionId, ownedGiftId) {
     return null;
 }
 
+/**
+ * Считает, сколько GRAM (= TON, у нас 1:1) нужно списать с пользователя, чтобы
+ * покрыть комиссию Telegram в Stars за перевод конкретного подарка. Для
+ * большинства подарков transfer_star_count = 0 — комиссии нет вообще, тогда
+ * функция просто вернёт 0. Округляем в большую сторону до 2 знаков, чтобы
+ * не уйти в минус на округлении и случайно не покрыть комиссию не полностью.
+ */
+function starFeeToTon(starCount) {
+    if (!starCount) return 0;
+    return Math.ceil(starCount * STAR_TO_TON_RATE * 100) / 100;
+}
+
+// === Узнать комиссию за вывод ДО подтверждения — фронт показывает её
+// пользователю в диалоге подтверждения, ничего не списывая и не выполняя. ===
+app.get('/api/inventory/:id/withdraw-quote', requireAuth, async (req, res) => {
+    const listing = getListingWithDetails(req.params.id);
+
+    if (!listing || listing.owner_tg_id !== req.tgId) {
+        return res.status(404).json({ ok: false, error: 'Подарок не найден' });
+    }
+
+    const deposit = getGiftDepositByListingId(listing.id);
+    if (!deposit) {
+        return res.json({ ok: true, starCount: 0, feeTon: 0 });
+    }
+
+    const connection = getActiveBusinessConnection();
+    if (!connection) {
+        return res.status(503).json({ ok: false, error: 'Приём/вывод подарков сейчас не настроен, попробуйте позже' });
+    }
+
+    try {
+        const giftOnAccount = await findOwnedGiftById(connection.connection_id, deposit.owned_gift_id);
+        const starCount = giftOnAccount?.transfer_star_count || 0;
+        res.json({ ok: true, starCount, feeTon: starFeeToTon(starCount) });
+    } catch (e) {
+        console.error('⚠️  Не удалось получить котировку комиссии вывода:', e);
+        res.status(500).json({ ok: false, error: 'Не удалось узнать комиссию, попробуйте позже' });
+    }
+});
+
 app.post('/api/inventory/:id/withdraw-gift', requireAuth, async (req, res) => {
     const listing = getListingWithDetails(req.params.id);
 
@@ -1438,38 +1513,102 @@ app.post('/api/inventory/:id/withdraw-gift', requireAuth, async (req, res) => {
         // Узнаём точную стоимость перевода в Stars (обычно 0 — бесплатно).
         const giftOnAccount = await findOwnedGiftById(connection.connection_id, deposit.owned_gift_id);
         const starCount = giftOnAccount?.transfer_star_count || 0;
+        const feeTon = starFeeToTon(starCount);
 
         if (giftOnAccount && giftOnAccount.can_be_transferred === false) {
             unlockListingAfterFailedWithdrawal(listing.id);
             return res.status(400).json({ ok: false, error: 'Telegram временно запрещает передачу этого подарка, попробуйте позже' });
         }
 
-        const transferRes = await fetch(`${TELEGRAM_API_BASE}/transferGift`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                business_connection_id: connection.connection_id,
-                owned_gift_id: deposit.owned_gift_id,
-                new_owner_chat_id: req.tgId,
-                star_count: starCount,
-            }),
-        });
-        const transferData = await transferRes.json();
+        // Комиссию Stars за перевод платит пользователь, а не мы — иначе она
+        // тихо списывалась бы со звёзд бизнес-аккаунта на каждый вывод.
+        // Списываем ДО перевода; если сам transferGift не удастся — вернём
+        // обратно в catch-ветке ниже.
+        let payer = null;
+        if (feeTon > 0) {
+            try {
+                payer = adjustBalance(req.tgId, -feeTon);
+            } catch (e) {
+                unlockListingAfterFailedWithdrawal(listing.id);
+                return res.status(400).json({
+                    ok: false,
+                    error: `Недостаточно средств для оплаты комиссии Telegram за перевод (${feeTon} GRAM)`,
+                });
+            }
+        }
 
-        if (!transferData.ok) {
-            console.error('⚠️  transferGift не удался:', transferData.description);
-            unlockListingAfterFailedWithdrawal(listing.id);
-            // Самая частая причина — получатель не был активен в Telegram
-            // последние 24 часа (требование самого Telegram).
-            return res.status(400).json({
-                ok: false,
-                error: transferData.description?.includes('CHAT_ADMIN_REQUIRED') || transferData.description?.includes('USER_')
-                    ? 'Не удалось передать подарок — откройте Telegram и повторите попытку через минуту'
-                    : (transferData.description || 'Не удалось передать подарок'),
+        // Сам перевод: если юзербот настроен (см. userbot.js) — используем
+        // его, он и есть основной способ прямо сейчас, раз Bot API не даёт
+        // боту нужное право. Если юзербот не настроен — пробуем старый путь
+        // через transferGift на случай, если Telegram когда-нибудь откроет
+        // это право боту (тогда ничего менять не придётся).
+        if (isUserbotConfigured()) {
+            const recipient = getUserByTgId(req.tgId);
+            if (!recipient?.username) {
+                unlockListingAfterFailedWithdrawal(listing.id);
+                if (feeTon > 0) adjustBalance(req.tgId, feeTon);
+                return res.status(400).json({
+                    ok: false,
+                    error: 'Для вывода подарка нужен публичный username в Telegram (Настройки → Изменить профиль → Имя пользователя)',
+                });
+            }
+            if (!deposit.gift_slug) {
+                unlockListingAfterFailedWithdrawal(listing.id);
+                if (feeTon > 0) adjustBalance(req.tgId, feeTon);
+                return res.status(400).json({
+                    ok: false,
+                    error: 'Для этого подарка нет сохранённого идентификатора для перевода — обратитесь в поддержку',
+                });
+            }
+
+            try {
+                await transferGiftViaUserbot(deposit.gift_slug, recipient.username);
+            } catch (e) {
+                console.error('⚠️  Перевод через юзербота не удался:', e.message);
+                unlockListingAfterFailedWithdrawal(listing.id);
+                if (feeTon > 0) adjustBalance(req.tgId, feeTon);
+                return res.status(400).json({ ok: false, error: e.message || 'Не удалось передать подарок' });
+            }
+        } else {
+            const transferRes = await fetch(`${TELEGRAM_API_BASE}/transferGift`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    business_connection_id: connection.connection_id,
+                    owned_gift_id: deposit.owned_gift_id,
+                    new_owner_chat_id: req.tgId,
+                    star_count: starCount,
+                }),
             });
+            const transferData = await transferRes.json();
+
+            if (!transferData.ok) {
+                console.error('⚠️  transferGift не удался:', transferData.description);
+                unlockListingAfterFailedWithdrawal(listing.id);
+                // Перевод не состоялся — комиссию, которую уже списали выше, возвращаем.
+                if (feeTon > 0) adjustBalance(req.tgId, feeTon);
+                // Самая частая причина — получатель не был активен в Telegram
+                // последние 24 часа (требование самого Telegram).
+                return res.status(400).json({
+                    ok: false,
+                    error: transferData.description?.includes('CHAT_ADMIN_REQUIRED') || transferData.description?.includes('USER_')
+                        ? 'Не удалось передать подарок — откройте Telegram и повторите попытку через минуту'
+                        : (transferData.description || 'Не удалось передать подарок'),
+                });
+            }
         }
 
         setListingStatus(listing.id, 'withdrawn');
+        if (feeTon > 0) {
+            createTransaction({
+                tg_id: req.tgId,
+                type: 'withdraw_gift_star_fee',
+                amount: -feeTon,
+                listing_id: listing.id,
+                collection_name: listing.collection_name,
+                gift_number: listing.gift_number,
+            });
+        }
         createTransaction({
             tg_id: req.tgId,
             type: 'withdraw_gift',
@@ -1486,7 +1625,8 @@ app.post('/api/inventory/:id/withdraw-gift', requireAuth, async (req, res) => {
             gift_number: listing.gift_number,
         });
 
-        res.json({ ok: true });
+        const currentUser = getUserByTgId(req.tgId);
+        res.json({ ok: true, starCount, feeTon, balance: currentUser.balance });
     } catch (e) {
         console.error('⚠️  Ошибка вывода подарка:', e);
         unlockListingAfterFailedWithdrawal(listing.id);

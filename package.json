@@ -17,6 +17,7 @@
     "express": "^4.21.0",
     "express-rate-limit": "^7.4.1",
     "helmet": "^8.0.0",
-    "jsonwebtoken": "^9.0.2"
+    "jsonwebtoken": "^9.0.2",
+    "telegram": "^2.26.16"
   }
 }

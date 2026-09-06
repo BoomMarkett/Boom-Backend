@@ -274,6 +274,13 @@ addColumnIfMissing('orders', 'filled_count', 'INTEGER NOT NULL DEFAULT 0');
 // в server.js), используется только для админ-консоли ("активны сейчас").
 addColumnIfMissing('users', 'last_seen_at', 'TEXT');
 
+// gift_slug — "универсальный" публичный идентификатор уникального подарка
+// (та же строка, что в ссылке t.me/nft/<slug>). В отличие от owned_gift_id
+// (который понимает только Bot API), slug работает и через обычный
+// протокол Telegram — он и нужен юзерботу (GramJS) для перевода подарка,
+// раз transferGift у бота сейчас заблокирован самим Telegram.
+addColumnIfMissing('gift_deposits', 'gift_slug', 'TEXT');
+
 // bot_visits — лёгкий лог "человек открыл приложение" (одна запись на каждый
 // успешный /api/auth). Нужен только для счётчика "посещений за 24ч" в
 // админ-консоли — поэтому не храним ничего кроме tg_id и времени.
@@ -1542,7 +1549,8 @@ function getActiveBusinessConnection() {
 // === Учёт зачисленных подарков-NFT (идемпотентность вебхука) ===
 const giftDepositStatements = {
     insert: db.prepare(`
-        INSERT INTO gift_deposits (owned_gift_id, tg_id, listing_id) VALUES (@owned_gift_id, @tg_id, @listing_id)
+        INSERT INTO gift_deposits (owned_gift_id, tg_id, listing_id, gift_slug)
+        VALUES (@owned_gift_id, @tg_id, @listing_id, @gift_slug)
     `),
     findByOwnedGiftId: db.prepare('SELECT * FROM gift_deposits WHERE owned_gift_id = ?'),
     findByListingId: db.prepare('SELECT * FROM gift_deposits WHERE listing_id = ?'),
@@ -1552,8 +1560,13 @@ function isGiftAlreadyDeposited(ownedGiftId) {
     return !!giftDepositStatements.findByOwnedGiftId.get(ownedGiftId);
 }
 
-function recordGiftDeposit(ownedGiftId, tgId, listingId) {
-    giftDepositStatements.insert.run({ owned_gift_id: ownedGiftId, tg_id: tgId, listing_id: listingId });
+function recordGiftDeposit(ownedGiftId, tgId, listingId, giftSlug = null) {
+    giftDepositStatements.insert.run({
+        owned_gift_id: ownedGiftId,
+        tg_id: tgId,
+        listing_id: listingId,
+        gift_slug: giftSlug,
+    });
 }
 
 function getGiftDepositByListingId(listingId) {
