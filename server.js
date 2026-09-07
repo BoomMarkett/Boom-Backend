@@ -69,6 +69,7 @@ const {
     isGiftAlreadyDeposited,
     recordGiftDeposit,
     getGiftDepositByListingId,
+    listGiftDepositsMissingSlug,
     setListingStatus,
     tryLockListingForWithdrawal,
     unlockListingAfterFailedWithdrawal,
@@ -1103,6 +1104,14 @@ function requireAdmin(req, res, next) {
 
 app.get('/api/admin/stats', requireAuth, requireAdmin, (req, res) => {
     res.json({ ok: true, stats: getAdminStats() });
+});
+
+// Депозиты подарков, у которых нет сохранённого gift_slug — их не сможет
+// увести юзербот (см. userbot.js), пока slug не дозаполнят вручную.
+// В основном это старые записи, сделанные до того, как gift_slug вообще
+// стали сохранять при депозите.
+app.get('/api/admin/gift-deposits-missing-slug', requireAuth, requireAdmin, (req, res) => {
+    res.json({ ok: true, deposits: listGiftDepositsMissingSlug() });
 });
 
 // === Адрес и баланс горячего кошелька для выводов — без этого узнать его

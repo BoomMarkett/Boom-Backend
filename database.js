@@ -1573,6 +1573,30 @@ function getGiftDepositByListingId(listingId) {
     return giftDepositStatements.findByListingId.get(listingId);
 }
 
+// Депозиты подарков без сохранённого gift_slug — не смогут уйти через
+// юзербота (transferGiftViaUserbot требует slug), пока кто-то не дозаполнит
+// его вручную. В основном это старые записи, сделанные до того, как gift_slug
+// вообще начали сохранять (см. миграцию addColumnIfMissing выше). Используется
+// только кнопкой "Проверка slug" в админ-консоли — диагностика, не для юзеров.
+function listGiftDepositsMissingSlug() {
+    return db.prepare(`
+        SELECT
+            gd.id AS deposit_id,
+            gd.owned_gift_id,
+            gd.tg_id,
+            u.username,
+            l.gift_number,
+            l.status AS listing_status,
+            c.name AS collection_name
+        FROM gift_deposits gd
+        LEFT JOIN users u ON u.tg_id = gd.tg_id
+        LEFT JOIN listings l ON l.id = gd.listing_id
+        LEFT JOIN collections c ON c.id = l.collection_id
+        WHERE gd.gift_slug IS NULL OR gd.gift_slug = ''
+        ORDER BY gd.created_at DESC
+    `).all();
+}
+
 module.exports = {
     db,
     findOrCreateUser,
@@ -1644,6 +1668,7 @@ module.exports = {
     isGiftAlreadyDeposited,
     recordGiftDeposit,
     getGiftDepositByListingId,
+    listGiftDepositsMissingSlug,
     touchUserLastSeen,
     recordBotVisit,
     saveGameSession,
