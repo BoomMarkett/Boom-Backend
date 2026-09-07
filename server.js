@@ -521,6 +521,50 @@ app.get('/api/deposit-nft-info', (req, res) => {
     res.json({ ok: true, username: BUSINESS_ACCOUNT_USERNAME });
 });
 
+// =====================================================================
+// АНИМАЦИЯ ПОДАРКА (Lottie) — ПРОКСИ К FRAGMENT
+//
+// Реальную Lottie-анимацию конкретного подарка (ту же, что показывает сам
+// Telegram) хостит fragment.com по предсказуемому адресу:
+//   https://nft.fragment.com/gift/<slug>.lottie.json
+// где <slug> — это "название-коллекции-без-пробелов-в-нижнем-регистре" +
+// "-" + номер подарка, например "plushpepe-1".
+//
+// Ходим туда С СЕРВЕРА, а не прямо из браузера пользователя:
+//  1) не зависим от того, отдаёт ли Fragment permissive CORS-заголовки —
+//     они могут их поменять в любой момент, сломав фронт без предупреждения;
+//  2) slug строго валидируется (только буквы/цифры/дефис) — иначе этот
+//     роут стал бы открытым прокси на произвольный fetch по чужим адресам.
+// =====================================================================
+const GIFT_SLUG_PATTERN = /^[a-z0-9]+-[0-9]+$/;
+
+app.get('/api/gift-animation/:slug', async (req, res) => {
+    const { slug } = req.params;
+
+    if (!GIFT_SLUG_PATTERN.test(slug)) {
+        return res.status(400).json({ ok: false, error: 'Некорректный slug подарка' });
+    }
+
+    try {
+        const upstreamRes = await fetch(`https://nft.fragment.com/gift/${slug}.lottie.json`);
+
+        if (!upstreamRes.ok) {
+            // 404 у Fragment — обычная ситуация (кастомный/тестовый подарок,
+            // которого там просто нет), а не ошибка нашего сервера.
+            return res.status(404).json({ ok: false, error: 'Анимация не найдена' });
+        }
+
+        const lottieJson = await upstreamRes.text();
+        // Анимация для конкретного slug'а никогда не меняется — можно спокойно
+        // кэшировать на стороне браузера/CDN надолго.
+        res.set('Cache-Control', 'public, max-age=604800, immutable');
+        res.type('application/json').send(lottieJson);
+    } catch (e) {
+        console.error(`⚠️  Не удалось получить анимацию подарка (slug: ${slug}):`, e.message);
+        res.status(502).json({ ok: false, error: 'Не удалось получить анимацию' });
+    }
+});
+
 // Курс конвертации Stars → TON, используется ТОЛЬКО для того, чтобы переложить
 // на пользователя комиссию Telegram за перевод подарка (transfer_star_count у
 // части подарков не 0 — см. блок "ВЫВОД ПОДАРКА-NFT" ниже). Официального
