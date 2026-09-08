@@ -1158,8 +1158,8 @@ app.post('/api/admin/withdraw-profit', requireAuth, requireAdmin, async (req, re
     // (тот же принцип, что и со списанием пользовательского баланса при
     // обычном выводе — см. комментарий там).
     const { availableToWithdraw } = getRevenueSummary();
-    if (availableToWithdraw < 0.5) {
-        return res.status(400).json({ ok: false, error: 'Нечего выводить — сумма меньше 0.5 TON' });
+    if (availableToWithdraw < 0.1) {
+        return res.status(400).json({ ok: false, error: 'Нечего выводить — сумма меньше 0.1 TON' });
     }
     const payout = createPlatformPayout(availableToWithdraw, OWNER_WALLET_ADDRESS);
 
