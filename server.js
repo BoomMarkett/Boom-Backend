@@ -39,6 +39,9 @@ const {
     resolveWithdrawal,
     recordRevenue,
     getRevenueSummary,
+    createPlatformPayout,
+    resolvePlatformPayout,
+    listPlatformPayouts,
     markWithdrawalAwaitingApproval,
     claimWithdrawalForProcessing,
     createOrder,
@@ -283,6 +286,16 @@ const ADMIN_TG_IDS = (process.env.ADMIN_TG_ID || '')
 // "задан ли вообще хоть один").
 const ADMIN_TG_ID = ADMIN_TG_IDS[0] || null;
 const WITHDRAW_MANUAL_APPROVAL_THRESHOLD = 500; // TON — от этой суммы включительно нужно ручное подтверждение
+
+// Кошелёк ВЛАДЕЛЬЦА площадки — именно сюда уходит накопленная комиссия по
+// кнопке "Вывести прибыль" в админ-консоли. Намеренно отдельная переменная
+// от пользовательских адресов вывода: адрес фиксирован настройкой сервера,
+// а не приходит с фронта в теле запроса — иначе кто угодно с доступом к
+// админ-эндпоинту (см. requireAdmin) мог бы увести прибыль на свой адрес.
+const OWNER_WALLET_ADDRESS = process.env.OWNER_WALLET_ADDRESS || '';
+if (!OWNER_WALLET_ADDRESS) {
+    console.warn('⚠️  OWNER_WALLET_ADDRESS не задан — кнопка "Вывести прибыль" будет недоступна.');
+}
 
 if (ADMIN_TG_IDS.length === 0) {
     console.warn(`⚠️  ADMIN_TG_ID не задан — выводы от ${WITHDRAW_MANUAL_APPROVAL_THRESHOLD} TON не смогут получить подтверждение и будут отклоняться.`);
@@ -1112,7 +1125,69 @@ app.get('/api/admin/stats', requireAuth, requireAdmin, (req, res) => {
 // баланс пользователей, а комиссии + чистый доход от игр), с разбивкой
 // по источникам, за 24ч и за всё время. См. platform_revenue в database.js. ===
 app.get('/api/admin/revenue', requireAuth, requireAdmin, (req, res) => {
-    res.json({ ok: true, revenue: getRevenueSummary() });
+    res.json({ ok: true, revenue: getRevenueSummary(), payouts: listPlatformPayouts(20) });
+});
+
+// === Вывести накопленную прибыль площадки на кошелёк владельца ===
+// Эти деньги никогда не были ничьим пользовательским балансом — комиссия
+// (маркет/трейд/вывод подарков) и чистый доход игр просто оседали на
+// горячем кошельке как "лишний" остаток сверх того, что причитается
+// пользователям. Эта ручка не трогает НИЧЕЙ баланс — только фиксирует в
+// platform_payouts, сколько из накопленного уже реально выведено, и
+// переиспользует ту же сериализованную очередь и функцию отправки, что и
+// обычные пользовательские выводы (см. runSerializedWithdrawal выше).
+app.post('/api/admin/withdraw-profit', requireAuth, requireAdmin, async (req, res) => {
+    if (!OWNER_WALLET_ADDRESS) {
+        return res.status(503).json({ ok: false, error: 'OWNER_WALLET_ADDRESS не задан на сервере' });
+    }
+    if (!TON_WITHDRAW_MNEMONIC) {
+        return res.status(503).json({ ok: false, error: 'Вывод временно недоступен, попробуйте позже' });
+    }
+
+    let toAddress;
+    try {
+        toAddress = Address.parse(OWNER_WALLET_ADDRESS);
+    } catch (e) {
+        return res.status(500).json({ ok: false, error: 'OWNER_WALLET_ADDRESS задан некорректно' });
+    }
+
+    // Считаем доступное к выводу и СРАЗУ резервируем его (создаём 'pending'
+    // запись) — обе операции синхронные и идут одна за другой без единого
+    // await между ними, поэтому повторное нажатие кнопки за секунду до ответа
+    // не сможет прочитать то же самое "доступно" и вывести прибыль дважды
+    // (тот же принцип, что и со списанием пользовательского баланса при
+    // обычном выводе — см. комментарий там).
+    const { availableToWithdraw } = getRevenueSummary();
+    if (availableToWithdraw < 0.5) {
+        return res.status(400).json({ ok: false, error: 'Нечего выводить — сумма меньше 0.5 TON' });
+    }
+    const payout = createPlatformPayout(availableToWithdraw, OWNER_WALLET_ADDRESS);
+
+    try {
+        await runSerializedWithdrawal(() => sendTonWithdrawal(toAddress, availableToWithdraw, 'BoomMarket profit payout'));
+        resolvePlatformPayout(payout.id, 'completed');
+        res.json({ ok: true, amount: availableToWithdraw, revenue: getRevenueSummary() });
+    } catch (e) {
+        console.error(`⚠️  Ошибка вывода прибыли площадки (сумма ${availableToWithdraw}):`, e.message);
+        console.error(e.stack);
+
+        if (e instanceof WithdrawalConfirmationTimeout) {
+            // Перевод мог реально уйти — не считаем сумму свободной для
+            // повторного вывода, помечаем как требующую проверки вручную.
+            resolvePlatformPayout(payout.id, 'needs_review', e.message);
+            return res.status(202).json({
+                ok: false,
+                pending: true,
+                error: 'Перевод отправлен в сеть, подтверждение задерживается. Проверьте кошелёк вручную через пару минут перед повторной попыткой.',
+            });
+        }
+
+        // Ошибка ДО отправки в сеть (например, не хватает TON на горячем
+        // кошельке даже с учётом накопленной прибыли) — сумма безопасно
+        // остаётся доступной для повторного вывода.
+        resolvePlatformPayout(payout.id, 'failed', e.message);
+        res.status(500).json({ ok: false, error: e.message || 'Не удалось отправить перевод' });
+    }
 });
 
 // Депозиты подарков, у которых нет сохранённого gift_slug — их не сможет

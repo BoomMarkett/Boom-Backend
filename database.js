@@ -242,6 +242,26 @@ db.exec(`
     CREATE INDEX IF NOT EXISTS idx_platform_revenue_source ON platform_revenue(source, created_at);
     CREATE INDEX IF NOT EXISTS idx_platform_revenue_created ON platform_revenue(created_at);
 
+    -- Реальные переводы накопленной прибыли площадки на кошелёк владельца
+    -- (кнопка "Вывести прибыль" в админ-консоли) — эти деньги ВСЕГДА и так
+    -- лежали на горячем кошельке (комиссия никогда не выводилась пользователю,
+    -- просто оседала там как остаток), эта таблица лишь фиксирует, сколько из
+    -- накопленного (platform_revenue) уже реально переведено, чтобы не
+    -- вывести одну и ту же прибыль дважды. status='pending' резервирует сумму
+    -- ДО отправки в сеть — та же схема, что и в withdrawals (см. комментарий
+    -- там), включая 'needs_review' для неоднозначного исхода (транзакция
+    -- отправлена, подтверждение не пришло вовремя — считаем деньги ушедшими,
+    -- чтобы не вывести их повторно).
+    CREATE TABLE IF NOT EXISTS platform_payouts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        amount REAL NOT NULL,
+        address TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending', -- pending | completed | failed | needs_review
+        note TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        resolved_at TEXT
+    );
+
     -- Business-подключение бота к личному Telegram-аккаунту, на который люди
     -- присылают подарки. connection_id нужен, чтобы позже вызывать
     -- getBusinessAccountGifts / transferGift от имени этого аккаунта.
@@ -1015,7 +1035,43 @@ function getRevenueSummary() {
         { allTime: 0, last24h: 0 }
     );
 
-    return { totals, bySource };
+    // Сколько из заработанного уже реально уехало на кошелёк владельца —
+    // pending/needs_review тоже считаем "занятым", чтобы не вывести те же
+    // деньги повторно, пока предыдущий перевод ещё не подтверждён/завис
+    // (см. комментарий у CREATE TABLE platform_payouts).
+    const paidOut = db.prepare(`
+        SELECT COALESCE(SUM(amount), 0) AS s FROM platform_payouts
+        WHERE status IN ('pending', 'completed', 'needs_review')
+    `).get().s;
+
+    const availableToWithdraw = Math.max(0, Math.round((totals.allTime - paidOut) * 100) / 100);
+
+    return { totals, bySource, paidOut, availableToWithdraw };
+}
+
+/** Резервирует сумму под вывод прибыли (создаёт строку 'pending') — делать
+ * это нужно синхронно и ДО отправки в сеть, той же логикой, что и списание
+ * баланса при обычном пользовательском выводе: если этого не сделать сразу,
+ * повторное нажатие кнопки за секунду до ответа сервера увело бы одну и ту
+ * же прибыль дважды. */
+function createPlatformPayout(amount, address) {
+    const info = db.prepare(`
+        INSERT INTO platform_payouts (amount, address) VALUES (?, ?)
+    `).run(amount, address);
+    return db.prepare('SELECT * FROM platform_payouts WHERE id = ?').get(info.lastInsertRowid);
+}
+
+function resolvePlatformPayout(id, status, note = null) {
+    db.prepare(`
+        UPDATE platform_payouts SET status = ?, note = ?, resolved_at = datetime('now') WHERE id = ?
+    `).run(status, note, id);
+    return db.prepare('SELECT * FROM platform_payouts WHERE id = ?').get(id);
+}
+
+function listPlatformPayouts(limit = 20) {
+    return db.prepare(`
+        SELECT * FROM platform_payouts ORDER BY created_at DESC LIMIT ?
+    `).all(limit);
 }
 
 function markWithdrawalAwaitingApproval(id) {
@@ -1710,6 +1766,9 @@ module.exports = {
     resolveWithdrawal,
     recordRevenue,
     getRevenueSummary,
+    createPlatformPayout,
+    resolvePlatformPayout,
+    listPlatformPayouts,
     markWithdrawalAwaitingApproval,
     claimWithdrawalForProcessing,
     createOrder,
