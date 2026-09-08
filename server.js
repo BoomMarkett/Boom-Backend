@@ -514,6 +514,27 @@ function giftDisplayName(details) {
 }
 
 /**
+ * Telegram не даёт передавать апгрейженный подарок сразу после получения —
+ * действует обязательный "период охлаждения" (по нашим наблюдениям около
+ * 7 дней с момента получения подарка ЭТИМ аккаунтом, то есть с момента
+ * депозита на маркетплейс). Ошибка юзербота в этом случае выглядит как
+ * "You cannot transfer this gift yet, wait 454147 seconds." — превращаем
+ * её в понятный текст с датой вместо сырых секунд.
+ */
+function friendlyUserbotTransferError(rawMessage) {
+    const match = /wait (\d+) seconds/i.exec(rawMessage || '');
+    if (!match) return rawMessage || 'Не удалось передать подарок';
+
+    const seconds = parseInt(match[1], 10);
+    const availableAt = new Date(Date.now() + seconds * 1000);
+    const days = Math.ceil(seconds / 86400);
+    const dateStr = availableAt.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+
+    return `Telegram не разрешает выводить этот подарок так скоро после получения — ` +
+        `подождите ещё примерно ${days} дн. (будет доступно ${dateStr})`;
+}
+
+/**
  * Строит t.me/nft/<slug> ссылку на конкретный подарок — тот же формат slug,
  * что и у анимации (buildGiftAnimationSlug на фронте): название коллекции
  * без пробелов/спецсимволов, в нижнем регистре, + номер подарка.
@@ -1863,7 +1884,7 @@ app.post('/api/inventory/:id/withdraw-gift', requireAuth, async (req, res) => {
                 console.error('⚠️  Перевод через юзербота не удался:', e.message);
                 unlockListingAfterFailedWithdrawal(listing.id);
                 adjustBalance(req.tgId, totalFeeTon);
-                return res.status(400).json({ ok: false, error: e.message || 'Не удалось передать подарок' });
+                return res.status(400).json({ ok: false, error: friendlyUserbotTransferError(e.message) });
             }
         } else {
             const transferRes = await fetch(`${TELEGRAM_API_BASE}/transferGift`, {
