@@ -513,6 +513,26 @@ function giftDisplayName(details) {
     return details.gift_number ? `${name} #${details.gift_number}` : name;
 }
 
+/**
+ * Строит t.me/nft/<slug> ссылку на конкретный подарок — тот же формат slug,
+ * что и у анимации (buildGiftAnimationSlug на фронте): название коллекции
+ * без пробелов/спецсимволов, в нижнем регистре, + номер подарка.
+ * Telegram сам распознаёт такую ссылку в тексте сообщения и рисует под ним
+ * интерактивную карточку коллекционного предмета с кнопкой "VIEW COLLECTIBLE"
+ * (с реальным фото, моделью/фоном/символом и т.д.) — то же самое, что видно,
+ * когда сам Telegram или другой бот присылает ссылку на подарок.
+ * Работает только для НАСТОЯЩИХ подарков (реально пришедших из Telegram) —
+ * у них gift_number совпадает с тем, что знает сам Telegram. У тестовых/
+ * посеянных вручную лотов ссылка просто не откроется ни во что особенное,
+ * поэтому в этих случаях лучше её не показывать (см. использование ниже).
+ */
+function giftDeepLink(item) {
+    if (!item || !item.collection_name || !item.gift_number) return null;
+    const clean = String(item.collection_name).replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+    if (!clean) return null;
+    return `https://t.me/nft/${clean}-${item.gift_number}`;
+}
+
 const TOKEN_LIFETIME = '24h';
 
 // =====================================================================
@@ -597,10 +617,16 @@ const MINI_APP_URL = process.env.MINI_APP_URL || 'https://boommarkett.github.io/
 /**
  * Отправляет пользователю уведомление в бота: с картинкой подарка (если
  * есть photoUrl) или просто текстом, плюс кнопка "Открыть BoomMarket".
+ * Если передан giftItem и для него удаётся построить t.me/nft/<slug>
+ * ссылку (см. giftDeepLink выше) — отправляем ссылку прямо в тексте
+ * сообщения вместо photoUrl: Telegram сам разворачивает такую ссылку в
+ * богатую карточку подарка (настоящее фото + таблица трейтов + кнопка
+ * "VIEW COLLECTIBLE"), это гораздо нагляднее, чем наша собственная картинка,
+ * и работает только для настоящих, реально полученных из Telegram подарков.
  * Никогда не бросает исключение наружу — сбой уведомления не должен
  * ломать основной запрос (продажу/трейд/оффер), только логируется.
  */
-async function notifyTelegram(tgId, text, photoUrl) {
+async function notifyTelegram(tgId, text, photoUrl, giftItem) {
     if (!BOT_TOKEN || !tgId) return;
 
     const replyMarkup = {
@@ -609,11 +635,24 @@ async function notifyTelegram(tgId, text, photoUrl) {
         ]],
     };
 
+    const deepLink = giftDeepLink(giftItem);
+
     try {
-        const method = photoUrl ? 'sendPhoto' : 'sendMessage';
-        const body = photoUrl
-            ? { chat_id: tgId, photo: photoUrl, caption: text, parse_mode: 'HTML', reply_markup: replyMarkup }
-            : { chat_id: tgId, text, parse_mode: 'HTML', reply_markup: replyMarkup };
+        let method;
+        let body;
+
+        if (deepLink) {
+            // Ссылка в тексте — даём Telegram самому построить превью подарка,
+            // свою картинку в этом случае не прикладываем (иначе получится
+            // два разных изображения подряд в одном сообщении).
+            method = 'sendMessage';
+            body = { chat_id: tgId, text: `${text}\n\n${deepLink}`, parse_mode: 'HTML', reply_markup: replyMarkup };
+        } else {
+            method = photoUrl ? 'sendPhoto' : 'sendMessage';
+            body = photoUrl
+                ? { chat_id: tgId, photo: photoUrl, caption: text, parse_mode: 'HTML', reply_markup: replyMarkup }
+                : { chat_id: tgId, text, parse_mode: 'HTML', reply_markup: replyMarkup };
+        }
 
         const res = await fetch(`${TELEGRAM_API_BASE}/${method}`, {
             method: 'POST',
@@ -959,7 +998,9 @@ async function creditIncomingGift(message) {
 
     await notifyTelegram(
         depositUser.tg_id,
-        `🎁 Ваш подарок <b>${gift.base_name} #${gift.number}</b> зачислен в Хранилище BoomMarket!`
+        `🎁 Ваш подарок <b>${gift.base_name} #${gift.number}</b> зачислен в Хранилище BoomMarket!`,
+        null,
+        { collection_name: gift.base_name, gift_number: gift.number }
     );
 }
 
@@ -2722,7 +2763,8 @@ app.post('/api/orders', requireAuth, (req, res) => {
         notifyTelegram(
             l.owner_tg_id,
             `💰 Вам предложили <b>${parsedPrice} 💎</b> за <b>${giftDisplayName(l)}</b>`,
-            l.model_image || l.collection_image
+            l.model_image || l.collection_image,
+            l
         );
     }
 
@@ -2843,7 +2885,8 @@ app.post('/api/listings/:id/buy', requireAuth, (req, res) => {
     notifyTelegram(
         sellerTgId,
         `🎉 <b>${giftDisplayName(listing)}</b> продан за ${listing.price} 💎\nНа баланс зачислено ${sellerPayout.toFixed(2)} 💎`,
-        listing.model_image || listing.collection_image
+        listing.model_image || listing.collection_image,
+        listing
     );
 
     res.json({ ok: true, balance: buyer.balance, listing: afterReserve });
@@ -3039,7 +3082,8 @@ app.post('/api/listings/:id/accept-offer', requireAuth, (req, res) => {
     notifyTelegram(
         order.buyer_tg_id,
         `✅ Ваше предложение принято!\n<b>${giftDisplayName(details)}</b> теперь ваш`,
-        details.model_image || details.collection_image
+        details.model_image || details.collection_image,
+        details
     );
 
     res.json({ ok: true, listing: soldListing, balance: seller.balance });
@@ -3175,7 +3219,8 @@ app.post('/api/trades', requireAuth, (req, res) => {
     notifyTelegram(
         recipientTgId,
         `🔄 Вам предложили обмен: <b>${itemsLabel}</b>${tonAmount && tonPayer === 'initiator' ? ` + ${tonAmount} 💎 доплата` : ''}`,
-        firstItem.model_image || firstItem.collection_image
+        firstItem.model_image || firstItem.collection_image,
+        firstItem
     );
 
     res.json({ ok: true, trade, balance: initiator.balance });
@@ -3215,7 +3260,8 @@ app.post('/api/trades/:id/accept', requireAuth, (req, res) => {
     notifyTelegram(
         result.trade.initiator_tg_id,
         `✅ Ваш обмен принят! <b>${giftDisplayName(firstItem)}</b>${result.trade.recipientItems.length > 1 ? ` и ещё ${result.trade.recipientItems.length - 1} шт.` : ''} теперь у вас`,
-        firstItem.model_image || firstItem.collection_image
+        firstItem.model_image || firstItem.collection_image,
+        firstItem
     );
 
     res.json({ ok: true, trade: result.trade, balance: user.balance });
