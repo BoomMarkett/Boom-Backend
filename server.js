@@ -57,6 +57,7 @@ const {
     listOffersForUser,
     declineOfferAsSeller,
     searchUsersByUsername,
+    getUserByUsername,
     listOwnedItemsForTgId,
     createTrade,
     getTradeWithItems,
@@ -1281,6 +1282,36 @@ app.post('/api/admin/withdraw-profit', requireAuth, requireAdmin, async (req, re
 // стали сохранять при депозите.
 app.get('/api/admin/gift-deposits-missing-slug', requireAuth, requireAdmin, (req, res) => {
     res.json({ ok: true, deposits: listGiftDepositsMissingSlug() });
+});
+
+// === Полная карточка пользователя по username — баланс, инвентарь (хранилище),
+// активные лоты на продаже и вся история операций. Для админ-панели: вбиваешь
+// ник, видишь всё про человека сразу. ===
+app.get('/api/admin/user/:username', requireAuth, requireAdmin, (req, res) => {
+    const user = getUserByUsername(req.params.username);
+
+    if (!user) {
+        return res.status(404).json({ ok: false, error: 'Пользователь с таким username не найден' });
+    }
+
+    const inventory = listOwnedItemsForTgId(user.tg_id);
+    const activeListings = findListings({ ownerTgId: user.tg_id });
+    const transactions = listTransactionsForUser(user.tg_id);
+
+    res.json({
+        ok: true,
+        user: {
+            tg_id: user.tg_id,
+            username: user.username,
+            first_name: user.first_name,
+            last_name: user.last_name,
+            photo_url: user.photo_url,
+            balance: user.balance,
+        },
+        inventory,
+        activeListings,
+        transactions,
+    });
 });
 
 // === Адрес и баланс горячего кошелька для выводов — без этого узнать его

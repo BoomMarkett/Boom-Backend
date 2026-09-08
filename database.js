@@ -1415,6 +1415,16 @@ function searchUsersByUsername(query, excludeTgId) {
     `).all(q, excludeTgId);
 }
 
+/** Точный поиск пользователя по username (без учёта регистра, "@" в начале
+ * игнорируется) — для админ-панели, где нужен конкретный человек, а не список. */
+function getUserByUsername(username) {
+    const q = String(username || '').trim().replace(/^@/, '');
+    if (!q) return null;
+    return db.prepare(`
+        SELECT * FROM users WHERE LOWER(username) = LOWER(?)
+    `).get(q);
+}
+
 /** Предметы конкретного пользователя (по трейтам, так же как listOwnedItemsForUser) —
  * используется, чтобы показать инициатору "предметы получателя" при создании трейда.
  * Данные не приватные — та же информация, что видна на публичных лотах маркета. */
@@ -1799,6 +1809,7 @@ module.exports = {
     listOffersForUser,
     declineOfferAsSeller,
     searchUsersByUsername,
+    getUserByUsername,
     listOwnedItemsForTgId,
     createTrade,
     getTradeById,
