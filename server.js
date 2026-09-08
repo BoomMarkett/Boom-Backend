@@ -84,6 +84,7 @@ const {
     loadGameSession,
     deleteGameSession,
     getAdminStats,
+    backupDatabaseTo,
 } = require('./database');
 
 const app = express();
@@ -1221,9 +1222,78 @@ app.get('/api/admin/wallet-info', requireAuth, requireAdmin, async (req, res) =>
     }
 });
 
+// =====================================================================
+// БЭКАП БАЗЫ ДАННЫХ — периодически шлём администратору файлом в Telegram.
+// Простое и надёжное решение без новой инфраструктуры: файл базы обычно
+// небольшой (текст/числа, картинки — только ссылки), Telegram Bot API
+// принимает документы до 50MB, а сам администратор и так открывает
+// Telegram каждый день. .backup() у better-sqlite3 безопасен даже во
+// время активной записи (WAL), в отличие от простого копирования файла.
+// =====================================================================
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const DB_BACKUP_INTERVAL_HOURS = parseFloat(process.env.DB_BACKUP_INTERVAL_HOURS) || 6;
+const DB_BACKUP_MAX_SIZE_MB = 45; // с запасом от лимита Bot API в 50MB
+
+async function sendDatabaseBackupToAdmin() {
+    if (!ADMIN_TG_ID || !BOT_TOKEN) {
+        console.warn('⚠️  Бэкап БД пропущен: ADMIN_TG_ID и/или BOT_TOKEN не заданы');
+        return;
+    }
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const tmpPath = path.join(os.tmpdir(), `boommarket-backup-${stamp}.db`);
+
+    try {
+        await backupDatabaseTo(tmpPath);
+
+        const sizeMb = fs.statSync(tmpPath).size / (1024 * 1024);
+        if (sizeMb > DB_BACKUP_MAX_SIZE_MB) {
+            console.error(`⚠️  Бэкап БД пропущен: файл весит ${sizeMb.toFixed(1)}MB — больше лимита Telegram на отправку файлов ботом. Нужен внешний бэкап (S3 и т.п.).`);
+            return;
+        }
+
+        const form = new FormData();
+        form.append('chat_id', String(ADMIN_TG_ID));
+        form.append('caption', `📦 Бэкап базы данных BoomMarket\n${new Date().toLocaleString('ru-RU')}`);
+        form.append('document', new Blob([fs.readFileSync(tmpPath)]), `boommarket-${stamp}.db`);
+
+        const res = await fetch(`${TELEGRAM_API_BASE}/sendDocument`, { method: 'POST', body: form });
+        const data = await res.json();
+
+        if (!data.ok) {
+            console.error('⚠️  Не удалось отправить бэкап БД в Telegram:', data.description);
+        } else {
+            console.log(`✅ Бэкап БД отправлен администратору (${sizeMb.toFixed(2)}MB)`);
+        }
+    } catch (e) {
+        console.error('⚠️  Ошибка создания/отправки бэкапа БД:', e.message);
+    } finally {
+        fs.unlink(tmpPath, () => {}); // не критично, если временный файл не удалится — ОС приберёт сама
+    }
+}
+
+if (ADMIN_TG_ID && BOT_TOKEN) {
+    setInterval(sendDatabaseBackupToAdmin, DB_BACKUP_INTERVAL_HOURS * 60 * 60 * 1000);
+    console.log(`🗄️  Автобэкап БД включён: каждые ${DB_BACKUP_INTERVAL_HOURS}ч администратору в Telegram`);
+} else {
+    console.warn('⚠️  Автобэкап БД выключен — задайте ADMIN_TG_ID и BOT_TOKEN, чтобы включить.');
+}
+
+// Ручной запуск бэкапа прямо сейчас — например, перед рискованным
+// обновлением/миграцией, не дожидаясь следующего автоматического окна.
+app.post('/api/admin/backup', requireAuth, requireAdmin, async (req, res) => {
+    try {
+        await sendDatabaseBackupToAdmin();
+        res.json({ ok: true });
+    } catch (e) {
+        res.status(500).json({ ok: false, error: e.message });
+    }
+});
+
 // === Пополнение баланса ===
-// ВАЖНО: сейчас это просто прибавляет сумму без проверки реального платежа.
-// Заглушка на время, пока не подключён приём настоящих TON-транзакций.
 // =====================================================================
 // РЕАЛЬНОЕ ПОПОЛНЕНИЕ БАЛАНСА (настоящий TON, не виртуальные циферки)
 // =====================================================================

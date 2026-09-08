@@ -13,6 +13,18 @@ console.log(`База данных: ${dbPath}`);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
+/**
+ * Безопасно копирует ЖИВУЮ базу в отдельный файл (использует нативный
+ * .backup() better-sqlite3 — корректно работает даже во время активной
+ * записи благодаря WAL, в отличие от простого fs.copyFile файла базы,
+ * который мог бы скопироваться в середине записи и оказаться битым).
+ * Вызывающий код (server.js) сам решает, что делать с результатом —
+ * например, отправить файл администратору в Telegram.
+ */
+async function backupDatabaseTo(destPath) {
+    await db.backup(destPath);
+}
+
 // === Создание таблиц (выполняется один раз при первом старте) ===
 db.exec(`
     CREATE TABLE IF NOT EXISTS users (
@@ -1726,6 +1738,7 @@ function listGiftDepositsMissingSlug() {
 
 module.exports = {
     db,
+    backupDatabaseTo,
     findOrCreateUser,
     getUserByTgId,
     setBalance,
