@@ -37,6 +37,8 @@ const {
     createWithdrawalRecord,
     getWithdrawalById,
     resolveWithdrawal,
+    recordRevenue,
+    getRevenueSummary,
     markWithdrawalAwaitingApproval,
     claimWithdrawalForProcessing,
     createOrder,
@@ -1106,6 +1108,13 @@ app.get('/api/admin/stats', requireAuth, requireAdmin, (req, res) => {
     res.json({ ok: true, stats: getAdminStats() });
 });
 
+// === Реальная прибыль площадки — сколько именно заработали (не общий
+// баланс пользователей, а комиссии + чистый доход от игр), с разбивкой
+// по источникам, за 24ч и за всё время. См. platform_revenue в database.js. ===
+app.get('/api/admin/revenue', requireAuth, requireAdmin, (req, res) => {
+    res.json({ ok: true, revenue: getRevenueSummary() });
+});
+
 // Депозиты подарков, у которых нет сохранённого gift_slug — их не сможет
 // увести юзербот (см. userbot.js), пока slug не дозаполнят вручную.
 // В основном это старые записи, сделанные до того, как gift_slug вообще
@@ -1541,6 +1550,13 @@ app.get('/api/inventory/:id/withdraw-quote', requireAuth, async (req, res) => {
     }
 });
 
+// Комиссия площадки за вывод NFT-подарка — обычный вывод TON (/api/withdraw)
+// комиссии не берёт, а этот — берёт: 0.3 TON. Отдельно и независимо от
+// возможной комиссии Stars за сам перевод (feeTon ниже) — та не наша прибыль,
+// это просто компенсация реальных расходов на Stars, а вот эти 0.3 TON —
+// настоящий доход площадки, попадают в учёт (platform_revenue, source='gift_withdraw').
+const GIFT_WITHDRAW_FEE_TON = 0.3;
+
 app.post('/api/inventory/:id/withdraw-gift', requireAuth, async (req, res) => {
     const listing = getListingWithDetails(req.params.id);
 
@@ -1586,20 +1602,21 @@ app.post('/api/inventory/:id/withdraw-gift', requireAuth, async (req, res) => {
         }
 
         // Комиссию Stars за перевод платит пользователь, а не мы — иначе она
-        // тихо списывалась бы со звёзд бизнес-аккаунта на каждый вывод.
-        // Списываем ДО перевода; если сам transferGift не удастся — вернём
-        // обратно в catch-ветке ниже.
+        // тихо списывалась бы со звёзд бизнес-аккаунта на каждый вывод (это
+        // просто компенсация расхода, не прибыль). А GIFT_WITHDRAW_FEE_TON —
+        // это уже наша собственная фиксированная комиссия площадки за сам
+        // вывод. Списываем обе суммы одной операцией ДО перевода; если
+        // перевод не удастся — вернём всё целиком в catch-ветке/ниже.
+        const totalFeeTon = Math.round((feeTon + GIFT_WITHDRAW_FEE_TON) * 100) / 100;
         let payer = null;
-        if (feeTon > 0) {
-            try {
-                payer = adjustBalance(req.tgId, -feeTon);
-            } catch (e) {
-                unlockListingAfterFailedWithdrawal(listing.id);
-                return res.status(400).json({
-                    ok: false,
-                    error: `Недостаточно средств для оплаты комиссии Telegram за перевод (${feeTon} GRAM)`,
-                });
-            }
+        try {
+            payer = adjustBalance(req.tgId, -totalFeeTon);
+        } catch (e) {
+            unlockListingAfterFailedWithdrawal(listing.id);
+            return res.status(400).json({
+                ok: false,
+                error: `Недостаточно средств для комиссии за вывод (${totalFeeTon} TON)`,
+            });
         }
 
         // Сам перевод: если юзербот настроен (см. userbot.js) — используем
@@ -1611,7 +1628,7 @@ app.post('/api/inventory/:id/withdraw-gift', requireAuth, async (req, res) => {
             const recipient = getUserByTgId(req.tgId);
             if (!recipient?.username) {
                 unlockListingAfterFailedWithdrawal(listing.id);
-                if (feeTon > 0) adjustBalance(req.tgId, feeTon);
+                adjustBalance(req.tgId, totalFeeTon);
                 return res.status(400).json({
                     ok: false,
                     error: 'Для вывода подарка нужен публичный username в Telegram (Настройки → Изменить профиль → Имя пользователя)',
@@ -1619,7 +1636,7 @@ app.post('/api/inventory/:id/withdraw-gift', requireAuth, async (req, res) => {
             }
             if (!deposit.gift_slug) {
                 unlockListingAfterFailedWithdrawal(listing.id);
-                if (feeTon > 0) adjustBalance(req.tgId, feeTon);
+                adjustBalance(req.tgId, totalFeeTon);
                 return res.status(400).json({
                     ok: false,
                     error: 'Для этого подарка нет сохранённого идентификатора для перевода — обратитесь в поддержку',
@@ -1631,7 +1648,7 @@ app.post('/api/inventory/:id/withdraw-gift', requireAuth, async (req, res) => {
             } catch (e) {
                 console.error('⚠️  Перевод через юзербота не удался:', e.message);
                 unlockListingAfterFailedWithdrawal(listing.id);
-                if (feeTon > 0) adjustBalance(req.tgId, feeTon);
+                adjustBalance(req.tgId, totalFeeTon);
                 return res.status(400).json({ ok: false, error: e.message || 'Не удалось передать подарок' });
             }
         } else {
@@ -1651,7 +1668,7 @@ app.post('/api/inventory/:id/withdraw-gift', requireAuth, async (req, res) => {
                 console.error('⚠️  transferGift не удался:', transferData.description);
                 unlockListingAfterFailedWithdrawal(listing.id);
                 // Перевод не состоялся — комиссию, которую уже списали выше, возвращаем.
-                if (feeTon > 0) adjustBalance(req.tgId, feeTon);
+                adjustBalance(req.tgId, totalFeeTon);
                 // Самая частая причина — получатель не был активен в Telegram
                 // последние 24 часа (требование самого Telegram).
                 return res.status(400).json({
@@ -1676,6 +1693,15 @@ app.post('/api/inventory/:id/withdraw-gift', requireAuth, async (req, res) => {
         }
         createTransaction({
             tg_id: req.tgId,
+            type: 'withdraw_gift_fee',
+            amount: -GIFT_WITHDRAW_FEE_TON,
+            listing_id: listing.id,
+            collection_name: listing.collection_name,
+            gift_number: listing.gift_number,
+        });
+        recordRevenue('gift_withdraw', GIFT_WITHDRAW_FEE_TON, req.tgId, `listing #${listing.id}`);
+        createTransaction({
+            tg_id: req.tgId,
             type: 'withdraw_gift',
             amount: 0,
             listing_id: listing.id,
@@ -1691,7 +1717,7 @@ app.post('/api/inventory/:id/withdraw-gift', requireAuth, async (req, res) => {
         });
 
         const currentUser = getUserByTgId(req.tgId);
-        res.json({ ok: true, starCount, feeTon, balance: currentUser.balance });
+        res.json({ ok: true, starCount, feeTon, giftWithdrawFeeTon: GIFT_WITHDRAW_FEE_TON, totalFeeTon, balance: currentUser.balance });
     } catch (e) {
         console.error('⚠️  Ошибка вывода подарка:', e);
         unlockListingAfterFailedWithdrawal(listing.id);
@@ -1786,6 +1812,7 @@ app.post('/api/games/slots/spin', requireAuth, gamesLimiter, (req, res) => {
     }
 
     createTransaction({ tg_id: req.tgId, type: 'game_slots', amount: netDelta });
+    recordRevenue('game_slots', -netDelta, req.tgId);
 
     res.json({
         ok: true,
@@ -1860,6 +1887,7 @@ app.post('/api/games/roulette/spin', requireAuth, gamesLimiter, (req, res) => {
     }
 
     createTransaction({ tg_id: req.tgId, type: 'game_roulette', amount: netDelta });
+    recordRevenue('game_roulette', -netDelta, req.tgId);
 
     res.json({
         ok: true,
@@ -2027,6 +2055,7 @@ app.post('/api/games/bomber/reveal', requireAuth, gamesLimiter, (req, res) => {
         // Подрыв — раунд проигран, ставка не возвращается (она уже списана при старте).
         bomberDelete(req.tgId);
         createTransaction({ tg_id: req.tgId, type: 'game_bomber', amount: -game.bet });
+        recordRevenue('game_bomber', game.bet, req.tgId);
         return res.json({
             ok: true,
             win: false,
@@ -2047,6 +2076,7 @@ app.post('/api/games/bomber/reveal', requireAuth, gamesLimiter, (req, res) => {
         bomberDelete(req.tgId);
         const user = adjustBalance(req.tgId, winAmount);
         createTransaction({ tg_id: req.tgId, type: 'game_bomber', amount: winAmount - game.bet });
+        recordRevenue('game_bomber', game.bet - winAmount, req.tgId);
         return res.json({
             ok: true,
             win: true,
@@ -2080,6 +2110,7 @@ app.post('/api/games/bomber/cashout', requireAuth, gamesLimiter, (req, res) => {
 
     const user = adjustBalance(req.tgId, winAmount);
     createTransaction({ tg_id: req.tgId, type: 'game_bomber', amount: winAmount - game.bet });
+    recordRevenue('game_bomber', game.bet - winAmount, req.tgId);
 
     res.json({ ok: true, win: true, multiplier, betAmount: game.bet, winAmount, balance: user.balance });
 });
@@ -2235,6 +2266,7 @@ app.post('/api/games/tower/pick', requireAuth, gamesLimiter, (req, res) => {
         // Ловушка — раунд проигран, ставка не возвращается (она уже списана при старте).
         towerDelete(req.tgId);
         createTransaction({ tg_id: req.tgId, type: 'game_tower', amount: -game.bet });
+        recordRevenue('game_tower', game.bet, req.tgId);
         return res.json({
             ok: true,
             win: false,
@@ -2257,6 +2289,7 @@ app.post('/api/games/tower/pick', requireAuth, gamesLimiter, (req, res) => {
         towerDelete(req.tgId);
         const user = adjustBalance(req.tgId, winAmount);
         createTransaction({ tg_id: req.tgId, type: 'game_tower', amount: winAmount - game.bet });
+        recordRevenue('game_tower', game.bet - winAmount, req.tgId);
         return res.json({
             ok: true,
             win: true,
@@ -2290,6 +2323,7 @@ app.post('/api/games/tower/cashout', requireAuth, gamesLimiter, (req, res) => {
 
     const user = adjustBalance(req.tgId, winAmount);
     createTransaction({ tg_id: req.tgId, type: 'game_tower', amount: winAmount - game.bet });
+    recordRevenue('game_tower', game.bet - winAmount, req.tgId);
 
     res.json({ ok: true, win: true, multiplier, betAmount: game.bet, winAmount, balance: user.balance });
 });
@@ -2352,6 +2386,7 @@ app.post('/api/games/dice/roll', requireAuth, gamesLimiter, (req, res) => {
     }
 
     createTransaction({ tg_id: req.tgId, type: 'game_dice', amount: netDelta });
+    recordRevenue('game_dice', -netDelta, req.tgId);
 
     res.json({
         ok: true,
@@ -2452,6 +2487,7 @@ app.post('/api/games/plinko/drop', requireAuth, gamesLimiter, (req, res) => {
     }
 
     createTransaction({ tg_id: req.tgId, type: 'game_plinko', amount: netDelta });
+    recordRevenue('game_plinko', -netDelta, req.tgId);
 
     res.json({
         ok: true,
@@ -2618,6 +2654,7 @@ app.post('/api/listings/:id/buy', requireAuth, (req, res) => {
     const sellerPayout = listing.price * (1 - MARKETPLACE_FEE_PERCENT / 100);
     const sellerTgId = listing.owner_tg_id;
     adjustBalance(sellerTgId, sellerPayout);
+    recordRevenue('market', listing.price - sellerPayout, sellerTgId, `listing #${listing.id}`);
 
     // Записываем обе стороны сделки в историю — снимок данных подарка берём
     // из listing (не из afterReserve, там только сырые поля без JOIN).
@@ -2703,6 +2740,7 @@ app.post('/api/listings/:id/relist', requireAuth, (req, res) => {
     if (matchedOrder && matchedOrder.buyer_tg_id !== req.tgId) {
         const sellerPayout = updated.price * (1 - MARKETPLACE_FEE_PERCENT / 100);
         adjustBalance(req.tgId, sellerPayout);
+        recordRevenue('market', updated.price - sellerPayout, req.tgId, `listing #${updated.id}`);
 
         const refund = matchedOrder.max_price - updated.price;
         if (refund > 1e-9) {
@@ -2812,6 +2850,7 @@ app.post('/api/listings/:id/accept-offer', requireAuth, (req, res) => {
     // получает её за вычетом комиссии.
     const sellerPayout = order.max_price * (1 - MARKETPLACE_FEE_PERCENT / 100);
     const seller = adjustBalance(req.tgId, sellerPayout);
+    recordRevenue('market', order.max_price - sellerPayout, req.tgId, `listing #${listing.id}, order #${order.id}`);
 
     const details = getListingWithDetails(listing.id);
     const soldListing = details;

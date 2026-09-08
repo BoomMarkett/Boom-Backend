@@ -222,6 +222,26 @@ db.exec(`
 
     CREATE INDEX IF NOT EXISTS idx_withdrawals_tg_id ON withdrawals(tg_id, status);
 
+    -- Учёт РЕАЛЬНОЙ прибыли площадки — отдельно от баланса пользователей и
+    -- отдельно от истории транзакций (transactions — это выписка по счёту
+    -- КОНКРЕТНОГО пользователя, а не сводный P&L площадки). Каждое удержание
+    -- комиссии — маркет (1.5%), трейд (0.05 TON), комиссия за вывод подарка
+    -- (0.3 TON) — и каждый исход игрового раунда пишется сюда отдельной
+    -- строкой. amount может быть и отрицательным (например, крупная выплата
+    -- в игре, где раунд оказался в минус площадке) — это нормально и нужно
+    -- для честного P&L, а не только "сколько собрали комиссий".
+    CREATE TABLE IF NOT EXISTS platform_revenue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source TEXT NOT NULL, -- market | trade | gift_withdraw | game_slots | game_roulette | game_bomber | game_tower | game_dice | game_plinko
+        amount REAL NOT NULL,
+        tg_id INTEGER,
+        note TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_platform_revenue_source ON platform_revenue(source, created_at);
+    CREATE INDEX IF NOT EXISTS idx_platform_revenue_created ON platform_revenue(created_at);
+
     -- Business-подключение бота к личному Telegram-аккаунту, на который люди
     -- присылают подарки. connection_id нужен, чтобы позже вызывать
     -- getBusinessAccountGifts / transferGift от имени этого аккаунта.
@@ -953,6 +973,51 @@ function resolveWithdrawal(id, status, note = null) {
     return withdrawalStatements.findById.get(id);
 }
 
+// === Учёт реальной прибыли площадки (platform_revenue) ===
+const revenueStatements = {
+    insert: db.prepare(`INSERT INTO platform_revenue (source, amount, tg_id, note) VALUES (?, ?, ?, ?)`),
+};
+
+// Пишет ОДНУ строку в учёт прибыли. amount — это именно доход площадки от
+// этого конкретного события (сколько заработали именно сейчас), а не общая
+// сумма сделки — например, для продажи на маркете это 1.5% от цены, а не
+// вся цена; для проигрыша в игре — вся ставка; для выигрыша игрока — сумма
+// отрицательная (площадка в этот раз заплатила больше, чем взяла).
+function recordRevenue(source, amount, tgId = null, note = null) {
+    // Округляем до копеек и пропускаем совсем нулевые записи (например,
+    // комиссия Stars за вывод подарка иногда равна 0) — незачем засорять
+    // таблицу строками, которые ничего не меняют в отчёте.
+    const rounded = Math.round(amount * 100) / 100;
+    if (rounded === 0) return;
+    revenueStatements.insert.run(source, rounded, tgId, note);
+}
+
+// Сводка для админ-панели: сколько заработано за всё время и за последние
+// 24 часа, целиком и с разбивкой по источникам (маркет/трейд/вывод
+// подарков/каждая игра отдельно).
+function getRevenueSummary() {
+    const bySource = db.prepare(`
+        SELECT
+            source,
+            COALESCE(SUM(amount), 0) AS allTime,
+            COALESCE(SUM(CASE WHEN created_at >= datetime('now', '-24 hours') THEN amount ELSE 0 END), 0) AS last24h
+        FROM platform_revenue
+        GROUP BY source
+        ORDER BY allTime DESC
+    `).all();
+
+    const totals = bySource.reduce(
+        (acc, row) => {
+            acc.allTime += row.allTime;
+            acc.last24h += row.last24h;
+            return acc;
+        },
+        { allTime: 0, last24h: 0 }
+    );
+
+    return { totals, bySource };
+}
+
 function markWithdrawalAwaitingApproval(id) {
     withdrawalStatements.markAwaitingApproval.run(id);
     return getWithdrawalById(id);
@@ -1454,7 +1519,13 @@ function acceptTrade(tradeId, actingTgId) {
 
         // Комиссия площадки: уже удержана с инициатора при создании трейда —
         // при успешном приёме она просто не возвращается (никакого движения
-        // денег здесь больше не требуется).
+        // денег здесь больше не требуется). Именно здесь, а не при создании
+        // трейда, фиксируем её в учёте прибыли — при decline/cancel/failed
+        // комиссия возвращается инициатору (см. refundInitiatorReserve) и
+        // доходом площадки так и не становится.
+        if (trade.fee_amount > 0) {
+            recordRevenue('trade', trade.fee_amount, trade.initiator_tg_id, `trade #${tradeId}`);
+        }
 
         const logSide = (tgId, itemsGiven, itemsReceived) => {
             itemsGiven.forEach(gift => createTransaction({
@@ -1637,6 +1708,8 @@ module.exports = {
     createWithdrawalRecord,
     getWithdrawalById,
     resolveWithdrawal,
+    recordRevenue,
+    getRevenueSummary,
     markWithdrawalAwaitingApproval,
     claimWithdrawalForProcessing,
     createOrder,
