@@ -1341,6 +1341,12 @@ async function sendDatabaseBackupToAdmin() {
 if (ADMIN_TG_ID && BOT_TOKEN) {
     setInterval(sendDatabaseBackupToAdmin, DB_BACKUP_INTERVAL_HOURS * 60 * 60 * 1000);
     console.log(`🗄️  Автобэкап БД включён: каждые ${DB_BACKUP_INTERVAL_HOURS}ч администратору в Telegram`);
+    // Плюс один бэкап вскоре после каждого запуска/деплоя — иначе первая
+    // копия появилась бы только через DB_BACKUP_INTERVAL_HOURS часов, а
+    // именно сразу после деплоя (когда что-то могло пойти не так) свежего
+    // бэкапа особенно не хватало бы. Задержка нужна, чтобы не мешать
+    // серверу спокойно подняться и начать отвечать на запросы.
+    setTimeout(sendDatabaseBackupToAdmin, 60 * 1000);
 } else {
     console.warn('⚠️  Автобэкап БД выключен — задайте ADMIN_TG_ID и BOT_TOKEN, чтобы включить.');
 }
