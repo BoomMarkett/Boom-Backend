@@ -2,12 +2,14 @@
  * userbot.js
  *
  * Перевод NFT-подарков через ОБЫЧНЫЙ Telegram-аккаунт (не через Bot API),
- * с помощью библиотеки GramJS (протокол MTProto — тот же, что использует
- * официальное приложение Telegram). Нужен потому, что метод бота
- * transferGift сейчас требует право "Передача и улучшение подарков",
- * которое Telegram временно не выдаёт (см. обсуждение в чате) — а вот
- * обычный человек в приложении дарить подарки может всегда, и юзербот
- * действует ровно так же, только автоматически.
+ * с помощью библиотеки teleproto (протокол MTProto — тот же, что использует
+ * официальное приложение Telegram; это активно поддерживаемый форк
+ * GramJS — сама GramJS официально заброшена и не отслеживает новые слои TL
+ * Telegram, из-за чего в ней просто нет актуальных методов для подарков).
+ * Нужен потому, что метод бота transferGift сейчас требует право "Передача
+ * и улучшение подарков", которое Telegram временно не выдаёт (см.
+ * обсуждение в чате) — а вот обычный человек в приложении дарить подарки
+ * может всегда, и юзербот действует ровно так же, только автоматически.
  *
  * ⚠️ ВАЖНО ПРО БЕЗОПАСНОСТЬ:
  * TELEGRAM_USERBOT_SESSION — это ПОЛНЫЙ доступ к личному Telegram-аккаунту
@@ -34,8 +36,8 @@
  *      на https://my.telegram.org/apps (это НЕ то же самое, что BOT_TOKEN).
  */
 
-const { TelegramClient, Api } = require('telegram');
-const { StringSession } = require('telegram/sessions');
+const { TelegramClient, Api } = require('teleproto');
+const { StringSession } = require('teleproto/sessions');
 
 const TELEGRAM_API_ID = parseInt(process.env.TELEGRAM_API_ID || '0', 10);
 const TELEGRAM_API_HASH = process.env.TELEGRAM_API_HASH || '';

@@ -27,8 +27,8 @@
  */
 
 const readline = require('readline');
-const { TelegramClient } = require('telegram');
-const { StringSession } = require('telegram/sessions');
+const { TelegramClient } = require('teleproto');
+const { StringSession } = require('teleproto/sessions');
 
 const apiId = parseInt(process.env.TELEGRAM_API_ID || '0', 10);
 const apiHash = process.env.TELEGRAM_API_HASH || '';
