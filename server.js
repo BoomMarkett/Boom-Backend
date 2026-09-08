@@ -972,6 +972,28 @@ function isValidAmount(amount, min = 0.1, max = 100000) {
     return Math.abs(tenths - amount * 10) < 1e-6;
 }
 
+// Криптостойкая замена Math.random() — используется ВЕЗДЕ, где результат
+// определяет исход платной игры (реальные деньги пользователей). Обычный
+// Math.random() в Node.js не криптостойкий: опубликованы способы по серии
+// результатов восстановить внутреннее состояние генератора и предсказывать
+// дальнейшие числа — неприемлемый риск для казино с реальными деньгами.
+// crypto.randomInt() — генератор на основе криптографии уровня ОС, той же,
+// что используется для ключей шифрования.
+//
+// secureRandomFloat() — аналог Math.random(): float в [0, 1), для весовых
+// розыгрышей (слоты/рулетка/плинко). secureRandomInt(maxExclusive) — аналог
+// Math.floor(Math.random() * n): целое в [0, maxExclusive), для тасовок и
+// прямого выбора индекса/кубика.
+function secureRandomFloat() {
+    // 2^31 даёт достаточную точность для любых наших весовых розыгрышей,
+    // оставаясь быстрым (randomInt поддерживает диапазон вплоть до 2^48).
+    return crypto.randomInt(0, 2147483647) / 2147483647;
+}
+
+function secureRandomInt(maxExclusive) {
+    return crypto.randomInt(0, maxExclusive);
+}
+
 // Сравнение секретов постоянным временем — обычное === "утекает" через
 // время выполнения (сколько символов совпало до первого расхождения),
 // что теоретически позволяет подобрать секрет по времени ответа. Здесь
@@ -1318,7 +1340,7 @@ function generateDepositMemo() {
     const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     let code = '';
     for (let i = 0; i < 8; i++) {
-        code += alphabet[Math.floor(Math.random() * alphabet.length)];
+        code += alphabet[secureRandomInt(alphabet.length)];
     }
     return `BM-${code}`;
 }
@@ -1912,7 +1934,7 @@ const SLOTS_MIN_BET = 0.3;
 const SLOTS_MAX_BET = 1000;
 
 function spinReel() {
-    let roll = Math.random() * SLOTS_TOTAL_WEIGHT;
+    let roll = secureRandomFloat() * SLOTS_TOTAL_WEIGHT;
     for (const symbol of SLOTS_SYMBOLS) {
         if (roll < symbol.weight) return symbol.id;
         roll -= symbol.weight;
@@ -1992,7 +2014,7 @@ const ROULETTE_MIN_BET = 0.3;
 const ROULETTE_MAX_BET = 1000;
 
 function spinRoulette() {
-    let roll = Math.random() * ROULETTE_TOTAL_WEIGHT;
+    let roll = secureRandomFloat() * ROULETTE_TOTAL_WEIGHT;
     for (const segment of ROULETTE_SEGMENTS) {
         if (roll < segment.weight) return segment;
         roll -= segment.weight;
@@ -2170,7 +2192,7 @@ app.post('/api/games/bomber/start', requireAuth, gamesLimiter, (req, res) => {
     // Расставляем бомбы случайно по 25 ячейкам (индексы 0..24).
     const positions = Array.from({ length: BOMBER_GRID_SIZE }, (_, i) => i);
     for (let i = positions.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
+        const j = secureRandomInt(i + 1);
         [positions[i], positions[j]] = [positions[j], positions[i]];
     }
     const bombSet = new Set(positions.slice(0, bombs));
@@ -2355,7 +2377,7 @@ function towerPublicState(game) {
 function towerGenerateFloorTraps(tiles, traps) {
     const positions = Array.from({ length: tiles }, (_, i) => i);
     for (let i = positions.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
+        const j = secureRandomInt(i + 1);
         [positions[i], positions[j]] = [positions[j], positions[i]];
     }
     return positions.slice(0, traps);
@@ -2518,7 +2540,7 @@ app.post('/api/games/dice/roll', requireAuth, gamesLimiter, (req, res) => {
     }
 
     // Бросок — случайное число от 1 до 6.
-    const roll = 1 + Math.floor(Math.random() * 6);
+    const roll = 1 + secureRandomInt(6);
     const isWin = roll === number;
     const winAmount = isWin ? applyGameWinFee(Math.round(bet * DICE_PAYOUT_MULTIPLIER * 100) / 100) : 0;
     const netDelta = Math.round((winAmount - bet) * 100) / 100;
@@ -2581,7 +2603,7 @@ const PLINKO_TOTAL_WEIGHT = PLINKO_WEIGHTS.reduce((sum, w) => sum + w, 0);
 
 // Выбираем итоговую корзину по весовой таблице (не по 16 честным монеткам).
 function plinkoPickBinIndex() {
-    let roll = Math.random() * PLINKO_TOTAL_WEIGHT;
+    let roll = secureRandomFloat() * PLINKO_TOTAL_WEIGHT;
     for (let i = 0; i < PLINKO_WEIGHTS.length; i++) {
         if (roll < PLINKO_WEIGHTS[i]) return i;
         roll -= PLINKO_WEIGHTS[i];
@@ -2595,7 +2617,7 @@ function plinkoPickBinIndex() {
 function plinkoGeneratePath(targetIndex) {
     const path = Array(PLINKO_ROWS).fill(false).fill(true, 0, targetIndex);
     for (let i = path.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
+        const j = secureRandomInt(i + 1);
         [path[i], path[j]] = [path[j], path[i]];
     }
     return path;
