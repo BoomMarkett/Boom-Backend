@@ -1284,6 +1284,22 @@ app.get('/api/admin/gift-deposits-missing-slug', requireAuth, requireAdmin, (req
     res.json({ ok: true, deposits: listGiftDepositsMissingSlug() });
 });
 
+// === Тестовое пополнение СОБСТВЕННОГО баланса админа — в обход реального
+// TON-депозита, чисто чтобы проверять функционал маркета/покупок без
+// настоящих денег. Доступно только тому, чей tg_id указан в ADMIN_TG_ID. ===
+app.post('/api/admin/topup', requireAuth, requireAdmin, (req, res) => {
+    const amount = parseFloat(req.body.amount);
+
+    if (!amount || amount <= 0) {
+        return res.status(400).json({ ok: false, error: 'Укажите положительную сумму' });
+    }
+
+    const user = adjustBalance(req.tgId, amount);
+    createTransaction({ tg_id: req.tgId, type: 'deposit', amount });
+
+    res.json({ ok: true, balance: user.balance });
+});
+
 // === Полная карточка пользователя по username — баланс, инвентарь (хранилище),
 // активные лоты на продаже и вся история операций. Для админ-панели: вбиваешь
 // ник, видишь всё про человека сразу. ===
