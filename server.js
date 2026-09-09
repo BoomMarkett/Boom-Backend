@@ -1837,7 +1837,7 @@ app.post('/api/inventory/:id/withdraw-gift', requireAuth, async (req, res) => {
     if (!deposit) {
         return res.status(400).json({
             ok: false,
-            error: 'Этот подарок был добавлен не через депозит из Telegram — автоматический вывод для него недоступен',
+            error: 'Не удалось вывести подарок, попробуйте позже',
         });
     }
 
