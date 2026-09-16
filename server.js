@@ -566,6 +566,25 @@ const TOKEN_LIFETIME = '24h';
 // =====================================================================
 const TELEGRAM_API_BASE = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
+/**
+ * Превращает file_id стикера (модели/символа подарка) в прямую ссылку на
+ * файл — именно эта ссылка сохраняется как model_image/symbol_icon в базе.
+ * Возвращает null при любой ошибке (например, стикер — анимация .tgs, а не
+ * статичная картинка) — вызывающий код просто оставит поле как было.
+ */
+async function resolveTelegramFileUrl(fileId) {
+    if (!fileId) return null;
+    try {
+        const res = await fetch(`${TELEGRAM_API_BASE}/getFile?file_id=${encodeURIComponent(fileId)}`);
+        const data = await res.json();
+        if (!data.ok || !data.result?.file_path) return null;
+        return `https://api.telegram.org/file/bot${BOT_TOKEN}/${data.result.file_path}`;
+    } catch (e) {
+        console.error('⚠️  Не удалось получить файл стикера из Telegram:', e.message);
+        return null;
+    }
+}
+
 // Публичный юзернейм личного аккаунта, подключённого как Telegram Business
 // (см. блок "ПРИЁМ ПОДАРКОВ-NFT" ниже) — именно ему пользователи реально
 // присылают NFT-подарки, чтобы они зачислились в Хранилище. Используется
@@ -973,11 +992,24 @@ async function creditIncomingGift(message) {
     // ещё нет в каталоге — заводим новую (без ton_address).
     const collection = findOrCreateCollectionByName(gift.base_name, null);
 
+    // Модель/символ у Telegram — отдельные стикеры (не превью всего подарка),
+    // поэтому именно они и есть настоящая иконка, которая совпадает с тем,
+    // что видно в самом Telegram. Раньше сюда передавался null, и в базе
+    // навсегда оставались картинки, "угаданные" при первичном наполнении
+    // через TonAPI — они не всегда совпадали с оригиналом. Берём именно
+    // статичный thumbnail стикера (не сам файл стикера) — стикер часто
+    // анимированный (.tgs), а обычный <img> такое не отрисует; thumbnail
+    // у Telegram всегда обычная статичная картинка, даже для анимаций.
+    const [modelImageUrl, symbolIconUrl] = await Promise.all([
+        resolveTelegramFileUrl(gift.model?.sticker?.thumbnail?.file_id || gift.model?.sticker?.file_id),
+        resolveTelegramFileUrl(gift.symbol?.sticker?.thumbnail?.file_id || gift.symbol?.sticker?.file_id),
+    ]);
+
     const modelId = upsertModel(
         collection.id,
         gift.model?.name || 'Unknown',
         gift.model?.rarity_per_mille ?? null,
-        null
+        modelImageUrl
     );
     const backdropId = upsertBackdrop(
         collection.id,
@@ -991,7 +1023,7 @@ async function creditIncomingGift(message) {
     const symbolId = upsertSymbol(
         collection.id,
         gift.symbol?.name || 'Unknown',
-        null,
+        symbolIconUrl,
         gift.symbol?.rarity_per_mille ?? null
     );
 

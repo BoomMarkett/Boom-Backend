@@ -524,12 +524,15 @@ const catalogStatements = {
         VALUES (@collection_id, @name, @color_hex, @image_url, @rarity_permille)
         ON CONFLICT(collection_id, name) DO UPDATE SET
             rarity_permille = excluded.rarity_permille,
+            color_hex = COALESCE(excluded.color_hex, gift_backdrops.color_hex),
             image_url = COALESCE(excluded.image_url, gift_backdrops.image_url)
     `),
     upsertSymbol: db.prepare(`
         INSERT INTO gift_symbols (collection_id, name, icon_url, rarity_permille)
         VALUES (@collection_id, @name, @icon_url, @rarity_permille)
-        ON CONFLICT(collection_id, name) DO UPDATE SET rarity_permille = excluded.rarity_permille
+        ON CONFLICT(collection_id, name) DO UPDATE SET
+            rarity_permille = excluded.rarity_permille,
+            icon_url = COALESCE(excluded.icon_url, gift_symbols.icon_url)
     `),
     findModelId: db.prepare('SELECT id FROM gift_models WHERE collection_id = ? AND name = ?'),
     findBackdropId: db.prepare('SELECT id FROM gift_backdrops WHERE collection_id = ? AND name = ?'),
