@@ -1314,6 +1314,44 @@ app.get('/api/admin/user/:username', requireAuth, requireAdmin, (req, res) => {
     });
 });
 
+// === Добавить ЛЮБОЙ виртуальный подарок напрямую в чьё-то "Хранилище" —
+// в обход реального депозита из Telegram. Только для теста функционала.
+// Если username не указан — подарок уходит в хранилище самого админа. ===
+app.post('/api/admin/gift/add', requireAuth, requireAdmin, (req, res) => {
+    const { username, collectionId, modelId, backdropId, symbolId, giftNumber, price } = req.body;
+
+    let ownerTgId = req.tgId;
+    if (username) {
+        const targetUser = getUserByUsername(username);
+        if (!targetUser) {
+            return res.status(404).json({ ok: false, error: 'Пользователь с таким username не найден' });
+        }
+        ownerTgId = targetUser.tg_id;
+    }
+
+    const parsedCollectionId = parseInt(collectionId, 10);
+    const parsedGiftNumber = parseInt(giftNumber, 10);
+    const parsedPrice = parseFloat(price) || 0;
+
+    if (!parsedCollectionId || !parsedGiftNumber) {
+        return res.status(400).json({ ok: false, error: 'Укажите коллекцию и номер подарка' });
+    }
+
+    const listing = createListing({
+        owner_tg_id: ownerTgId,
+        collection_id: parsedCollectionId,
+        model_id: modelId ? parseInt(modelId, 10) : null,
+        backdrop_id: backdropId ? parseInt(backdropId, 10) : null,
+        symbol_id: symbolId ? parseInt(symbolId, 10) : null,
+        gift_number: parsedGiftNumber,
+        nft_address: null,
+        price: parsedPrice,
+        status: 'owned',
+    });
+
+    res.json({ ok: true, listing });
+});
+
 // === Адрес и баланс горячего кошелька для выводов — без этого узнать его
 // можно было только по логам ПОСЛЕ первого реального вывода (кошелёк
 // поднимается лениво, см. getHotWallet выше). Эта ручка форсирует то же
